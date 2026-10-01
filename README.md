@@ -60,6 +60,7 @@ Windows (per user: `HKCU\…\Run`) and starts that copy. Its files live there:
 
 ```
 cmd/agent/            entry point: install, single instance, logging, wiring
+cmd/virtual-printer/  a fake network printer for development
 internal/agent/       pairing, claim loop, heartbeat
 internal/api/         client for the API's /print-agent routes
 internal/escpos/      ticket → ESC/POS bytes
@@ -80,6 +81,27 @@ Run it against a local API without installing it:
 
 ```bash
 QT_PRINT_AGENT_API_URL=http://localhost:3000 go run ./cmd/agent --no-install --console
+```
+
+### No printer? Use the virtual one
+
+`cmd/virtual-printer` listens on TCP like a network printer and shows every ticket it receives as
+text, on the console and in `tickets/` (`.txt` as text, `.bin` exactly as sent):
+
+```bash
+go run ./cmd/virtual-printer
+```
+
+In the admin, add a network printer with address `127.0.0.1:9100` (the agent runs on the same PC).
+Stop it to see what a printer that is off looks like: tickets fail, retry and end up as failed.
+
+To exercise the Windows-spooler path too, point a Windows printer at it (PowerShell as
+administrator); it then shows up in the admin as a Windows printer:
+
+```powershell
+Add-PrinterPort -Name "QT_VIRTUAL" -PrinterHostAddress 127.0.0.1 -PortNumber 9100
+Add-PrinterDriver -Name "Generic / Text Only"
+Add-Printer -Name "QuickTable Virtual" -DriverName "Generic / Text Only" -PortName "QT_VIRTUAL"
 ```
 
 Build a release (no console window, API URL baked in):

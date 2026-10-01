@@ -151,3 +151,24 @@ func TestWrap(t *testing.T) {
 		}
 	}
 }
+
+func TestPreviewReadsATicketBack(t *testing.T) {
+	ticket := order()
+	ticket.Lines[0].Note = "sin sal, año nuevo"
+
+	text := Preview(Render(ticket, Options{PaperWidthMm: 80, Reprint: true, Location: time.UTC}))
+
+	for _, want := range []string{
+		"## COCINA",
+		"*** REIMPRESIÓN ***",
+		"## Mesa 5",
+		"2 x Bife de chorizo",
+		"  >> sin sal, año nuevo",
+		"NOTA: Apurados",
+		"- cut -",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("missing %q in:\n%s", want, text)
+		}
+	}
+}
