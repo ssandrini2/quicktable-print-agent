@@ -1,0 +1,177 @@
+// Package api is the agent's side of the QuickTable API's /print-agent routes.
+package api
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/quicktable/print-agent/internal/escpos"
+)
+
+// ErrUnauthorized means the agent's token is no longer good: it was unpaired.
+var ErrUnauthorized = errors.New("the agent is not paired (anymore)")
+
+// ErrNotHeld means the job isn't this agent's anymore (its lease ran out, or
+// it was cancelled): there is nothing to report.
+var ErrNotHeld = errors.New("the job is not held by this agent")
+
+// Slack on top of a long-poll's wait before the request is given up.
+const longPollSlack = 15 * time.Second
+
+// Client talks to one API with one agent's token.
+type Client struct {
+	baseURL string
+	token   string
+	version string
+	http    *http.Client
+}
+
+// New returns a client for the API at baseURL. token is empty until paired.
+func New(baseURL, token, version string) *Client {
+	return &Client{
+		baseURL: strings.TrimRight(baseURL, "/"),
+		token:   token,
+		version: version,
+		http:    &http.Client{},
+	}
+}
+
+// Pairing is a started pairing: the agent shows UserCode and polls with DeviceCode.
+type Pairing struct {
+	DeviceCode          string `json:"deviceCode"`
+	UserCode            string `json:"userCode"`
+	ExpiresInSeconds    int    `json:"expiresInSeconds"`
+	PollIntervalSeconds int    `json:"pollIntervalSeconds"`
+}
+
+// PairingStatus is "pending", "expired" or "approved" (then with the token).
+type PairingStatus struct {
+	Status string `json:"status"`
+	Token  string `json:"token"`
+}
+
+// Printer is where a job prints.
+type Printer struct {
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	Connection   string `json:"connection"`
+	Address      string `json:"address"`
+	PaperWidthMm int    `json:"paperWidthMm"`
+}
+
+// Job is a claimed print job.
+type Job struct {
+	ID      string        `json:"id"`
+	Attempt int           `json:"attempt"`
+	Reprint bool          `json:"reprint"`
+	Copies  int           `json:"copies"`
+	Printer Printer       `json:"printer"`
+	Ticket  escpos.Ticket `json:"ticket"`
+}
+
+// ReportedPrinter is a printer Windows has installed, as the heartbeat reports it.
+type ReportedPrinter struct {
+	Name   string `json:"name"`
+	Status string `json:"status,omitempty"`
+}
+
+// StartPairing asks for a new pairing code.
+func (c *Client) StartPairing(ctx context.Context) (Pairing, error) {
+	var pairing Pairing
+	err := c.post(ctx, "/print-agent/pair/start", nil, &pairing, 30*time.Second)
+	return pairing, err
+}
+
+// PollPairing asks whether a manager approved the code yet.
+func (c *Client) PollPairing(ctx context.Context, deviceCode string) (PairingStatus, error) {
+	var status PairingStatus
+	err := c.post(ctx, "/print-agent/pair/poll", map[string]string{"deviceCode": deviceCode}, &status, 30*time.Second)
+	return status, err
+}
+
+// Heartbeat tells the API the agent is alive and which printers its PC has.
+func (c *Client) Heartbeat(ctx context.Context, printers []ReportedPrinter) error {
+	if printers == nil {
+		printers = []ReportedPrinter{}
+	}
+	body := map[string]any{"version": c.version, "printers": printers}
+	return c.post(ctx, "/print-agent/heartbeat", body, nil, 30*time.Second)
+}
+
+// Claim long-polls for jobs: it returns as soon as there are some, or empty
+// after about wait.
+func (c *Client) Claim(ctx context.Context, wait time.Duration) ([]Job, error) {
+	var jobs []Job
+	body := map[string]int{"wait": int(wait.Seconds())}
+	err := c.post(ctx, "/print-agent/jobs/claim", body, &jobs, wait+longPollSlack)
+	return jobs, err
+}
+
+// Report settles a job: printed when printErr is nil, failed otherwise.
+func (c *Client) Report(ctx context.Context, jobID string, printErr error) error {
+	body := map[string]string{"status": "PRINTED"}
+	if printErr != nil {
+		body = map[string]string{"status": "FAILED", "error": printErr.Error()}
+	}
+	return c.post(ctx, "/print-agent/jobs/"+jobID+"/result", body, nil, 30*time.Second)
+}
+
+// post sends body as JSON and decodes the response's "data" into out.
+func (c *Client) post(ctx context.Context, path string, body, out any, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	payload := []byte("{}")
+	if body != nil {
+		var err error
+		if payload, err = json.Marshal(body); err != nil {
+			return err
+		}
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("User-Agent", "quicktable-print-agent/"+c.version)
+	if c.token != "" {
+		request.Header.Set("Authorization", "Bearer "+c.token)
+	}
+
+	response, err := c.http.Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(response.Body, 4<<20))
+	if err != nil {
+		return err
+	}
+
+	switch {
+	case response.StatusCode == http.StatusUnauthorized:
+		return ErrUnauthorized
+	case response.StatusCode == http.StatusConflict:
+		return ErrNotHeld
+	case response.StatusCode >= 300:
+		var failure struct {
+			Error string `json:"error"`
+		}
+		_ = json.Unmarshal(raw, &failure)
+		return fmt.Errorf("%s: HTTP %d %s", path, response.StatusCode, failure.Error)
+	}
+	if out == nil || len(raw) == 0 {
+		return nil
+	}
+	envelope := struct {
+		Data any `json:"data"`
+	}{Data: out}
+	return json.Unmarshal(raw, &envelope)
+}
