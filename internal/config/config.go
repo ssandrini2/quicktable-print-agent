@@ -16,6 +16,21 @@ type Config struct {
 	APIURL string `json:"apiUrl,omitempty"`
 	// Token is the pairing token, encrypted for this Windows user (see protect).
 	Token string `json:"token,omitempty"`
+	// Lang is the language chosen at install ("es" or "en").
+	Lang string `json:"lang,omitempty"`
+	// FailedUpdate is an update that was tried and undone: it isn't tried
+	// again, and the API is told.
+	FailedUpdate *FailedUpdate `json:"failedUpdate,omitempty"`
+}
+
+// FailedUpdate records an update the agent went back from.
+type FailedUpdate struct {
+	// Version is the one that failed.
+	Version string `json:"version"`
+	Error   string `json:"error"`
+	// From is the version that was (and stayed) running. Once the agent runs
+	// another one, the record is stale.
+	From string `json:"from"`
 }
 
 // Store reads and writes the state file in the agent's data directory.

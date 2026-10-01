@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/quicktable/print-agent/internal/escpos"
+	"github.com/quicktable/print-agent/internal/update"
 )
 
 // ErrUnauthorized means the agent's token is no longer good: it was unpaired.
@@ -96,13 +97,40 @@ func (c *Client) PollPairing(ctx context.Context, deviceCode string) (PairingSta
 	return status, err
 }
 
-// Heartbeat tells the API the agent is alive and which printers its PC has.
-func (c *Client) Heartbeat(ctx context.Context, printers []ReportedPrinter) error {
+// UpdateFailure is an update the agent tried and undid.
+type UpdateFailure struct {
+	Version string `json:"version"`
+	Error   string `json:"error"`
+}
+
+// UpdateWindow is when the agent may update on its own: minutes from
+// midnight on the PC's clock. Start after End wraps past midnight.
+type UpdateWindow struct {
+	StartMinute int `json:"startMinute"`
+	EndMinute   int `json:"endMinute"`
+}
+
+// HeartbeatResult is the API's answer to a heartbeat.
+type HeartbeatResult struct {
+	// Update is the release the agent should move to; nil when it runs what it should.
+	Update       *update.Release `json:"update"`
+	UpdateWindow UpdateWindow    `json:"updateWindow"`
+}
+
+// Heartbeat tells the API the agent is alive, which printers its PC has and
+// (failure, optional) an update it couldn't apply; the answer says whether
+// there's a release to update to.
+func (c *Client) Heartbeat(ctx context.Context, printers []ReportedPrinter, failure *UpdateFailure) (HeartbeatResult, error) {
 	if printers == nil {
 		printers = []ReportedPrinter{}
 	}
 	body := map[string]any{"version": c.version, "printers": printers}
-	return c.post(ctx, "/print-agent/heartbeat", body, nil, 30*time.Second)
+	if failure != nil {
+		body["updateFailure"] = failure
+	}
+	var result HeartbeatResult
+	err := c.post(ctx, "/print-agent/heartbeat", body, &result, 30*time.Second)
+	return result, err
 }
 
 // Claim long-polls for jobs: it returns as soon as there are some, or empty

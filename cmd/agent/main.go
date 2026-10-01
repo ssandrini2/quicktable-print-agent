@@ -1,5 +1,6 @@
 // The QuickTable print agent: a background app on the restaurant's cash PC
-// that prints the kitchen and bar tickets the API queues.
+// that prints the kitchen and bar tickets the API queues. The same executable
+// is its own installer, uninstaller and updater.
 package main
 
 import (
@@ -9,17 +10,19 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
-	"strings"
+	"sync"
+	"time"
 
 	"github.com/quicktable/print-agent/internal/agent"
 	"github.com/quicktable/print-agent/internal/api"
 	"github.com/quicktable/print-agent/internal/config"
+	"github.com/quicktable/print-agent/internal/i18n"
 	"github.com/quicktable/print-agent/internal/platform"
 	"github.com/quicktable/print-agent/internal/transport"
+	"github.com/quicktable/print-agent/internal/update"
 )
 
 // Set at build time: -ldflags "-X main.version=1.2.3 -X main.defaultAPIURL=https://…".
@@ -33,79 +36,142 @@ const (
 	logName      = "agent.log"
 	maxLogBytes  = 5 << 20
 	apiURLEnvVar = "QT_PRINT_AGENT_API_URL"
+	// How long the new version waits for the one it replaces to step aside.
+	handoverWait = 15 * time.Second
+	// What an update left behind is removed once the new version has run this long.
+	cleanupAfter = 2 * time.Minute
 )
 
+type options struct {
+	uninstall   bool
+	noInstall   bool
+	console     bool
+	afterUpdate bool
+	lang        string
+}
+
 func main() {
+	var opts options
 	showVersion := flag.Bool("version", false, "print the version and exit")
-	uninstall := flag.Bool("uninstall", false, "stop starting with Windows and forget the pairing")
-	noInstall := flag.Bool("no-install", false, "run from where it is instead of installing itself (development)")
-	console := flag.Bool("console", false, "also log to the console")
+	flag.BoolVar(&opts.uninstall, "uninstall", false, "remove the agent from this PC")
+	flag.BoolVar(&opts.noInstall, "no-install", false, "run from where it is: no install, no updates (development)")
+	flag.BoolVar(&opts.console, "console", false, "also log to the console")
+	flag.BoolVar(&opts.afterUpdate, "after-update", false, "internal: started by the version this one replaces")
+	flag.StringVar(&opts.lang, "lang", "", "language of the messages: es or en (default: Spanish, English on an English Windows)")
 	flag.Parse()
 
+	// Nothing else may happen here: an update runs "--version" on the new
+	// file to check it starts (see update.Check).
 	if *showVersion {
 		fmt.Println(version)
 		return
 	}
-	if err := run(*uninstall, *noInstall, *console); err != nil {
-		platform.Notify("El agente de impresión no pudo iniciar:\n\n" + err.Error())
+
+	dir, err := config.DefaultDir()
+	if err != nil {
+		platform.Notify(i18n.For(i18n.Spanish).Title, i18n.For(i18n.Spanish).StartFailed(err))
+		os.Exit(1)
+	}
+	store := config.Store{Dir: dir}
+	// A damaged file means starting over, unpaired.
+	saved, loadErr := store.Load()
+	if loadErr != nil {
+		saved = config.Config{}
+	}
+	texts := i18n.For(i18n.Pick(opts.lang, saved.Lang, platform.EnglishUI()))
+
+	app := &app{opts: opts, dir: dir, store: store, saved: saved, texts: texts}
+	if err := app.run(loadErr); err != nil {
+		platform.Notify(texts.Title, texts.StartFailed(err))
 		os.Exit(1)
 	}
 }
 
-func run(uninstall, noInstall, console bool) error {
-	dir, err := config.DefaultDir()
-	if err != nil {
-		return err
-	}
-	store := config.Store{Dir: dir}
+// app is one run of the program.
+type app struct {
+	opts  options
+	dir   string
+	store config.Store
+	texts i18n.Texts
+	log   *slog.Logger
 
-	if uninstall {
-		return doUninstall(store)
+	// saved is shared by the work loop and the heartbeat.
+	mu    sync.Mutex
+	saved config.Config
+
+	// releaseInstance gives up being "the" running agent (see applyUpdate).
+	releaseInstance func()
+}
+
+func (a *app) run(loadErr error) error {
+	if a.opts.uninstall {
+		return a.uninstall()
 	}
-	if !noInstall && runtime.GOOS == "windows" {
-		if moved, err := installSelf(dir); err != nil || moved {
+	installs := !a.opts.noInstall && runtime.GOOS == "windows"
+	if installs {
+		if done, err := a.install(); err != nil || done {
 			return err
 		}
 	}
 
-	only, err := platform.SingleInstance()
+	only, err := a.claimInstance()
 	if err != nil {
 		return err
 	}
 	if !only {
-		platform.Notify("El agente de impresión ya está funcionando en esta PC.")
+		platform.Notify(a.texts.Title, a.texts.AlreadyRunning)
 		return nil
 	}
 
-	log, closeLog, err := openLog(dir, console)
+	log, closeLog, err := openLog(a.dir, a.opts.console)
 	if err != nil {
 		return err
 	}
 	defer closeLog()
-
-	saved, err := store.Load()
-	if err != nil {
-		// A damaged file: start over, unpaired.
-		log.Warn("the saved configuration could not be read; starting unpaired", "err", err)
-		saved = config.Config{}
+	a.log = log
+	if loadErr != nil {
+		log.Warn("the saved configuration could not be read; starting unpaired", "err", loadErr)
 	}
-	apiURL := firstNonEmpty(os.Getenv(apiURLEnvVar), saved.APIURL, defaultAPIURL)
-	log.Info("print agent starting", "version", version, "api", apiURL)
+
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	if a.opts.afterUpdate {
+		// The version this one replaced may still need its copy to come back.
+		time.AfterFunc(cleanupAfter, func() { update.Cleanup(exe) })
+	} else if installs {
+		update.Cleanup(exe)
+	}
+	a.forgetStaleFailure()
+
+	apiURL := firstNonEmpty(os.Getenv(apiURLEnvVar), a.saved.APIURL, defaultAPIURL)
+	log.Info("print agent starting", "version", version, "api", apiURL, "afterUpdate", a.opts.afterUpdate)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
+	// An uninstall, or a reinstall over this one, asks it to stop.
+	if stopRequested, err := platform.StopRequested(); err != nil {
+		log.Warn("can't listen for a stop request", "err", err)
+	} else {
+		go func() {
+			select {
+			case <-stopRequested:
+				log.Info("asked to stop")
+				stop()
+			case <-ctx.Done():
+			}
+		}()
+	}
 
 	// One pairing notice on screen at a time: closed once the person closes it.
 	noticeClosed := make(chan struct{})
 	close(noticeClosed)
 	worker := &agent.Agent{
 		Connect:   func(token string) agent.API { return api.New(apiURL, token, version) },
-		LoadToken: func() string { return saved.PairingToken() },
+		LoadToken: func() string { a.mu.Lock(); defer a.mu.Unlock(); return a.saved.PairingToken() },
 		SaveToken: func(token string) error {
-			if err := saved.SetPairingToken(token); err != nil {
-				return err
-			}
-			return store.Save(saved)
+			return a.save(func(c *config.Config) error { return c.SetPairingToken(token) })
 		},
 		Send:              transport.Send,
 		InstalledPrinters: transport.InstalledPrinters,
@@ -122,13 +188,17 @@ func run(uninstall, noInstall, console bool) error {
 			noticeClosed = closed
 			go func() {
 				defer close(closed)
-				platform.Notify(pairingText(userCode))
+				platform.Notify(a.texts.Title, a.texts.PairingCode(userCode))
 			}()
 		},
-		Paired: func() {
-			go platform.Notify("Listo: esta PC ya imprime los tickets de QuickTable.\n\nEl agente queda funcionando en segundo plano y arranca solo con Windows.")
-		},
-		Log: log,
+		Paired:       func() { go platform.Notify(a.texts.Title, a.texts.Paired) },
+		FailedUpdate: a.failedUpdate,
+		Log:          log,
+	}
+	if installs {
+		worker.ApplyUpdate = func(ctx context.Context, release update.Release) error {
+			return a.applyUpdate(ctx, exe, release)
+		}
 	}
 	err = worker.Run(ctx)
 	log.Info("print agent stopped", "reason", err)
@@ -138,52 +208,34 @@ func run(uninstall, noInstall, console bool) error {
 	return err
 }
 
-// pairingText is what the person at the PC reads to pair the agent.
-func pairingText(userCode string) string {
-	code := userCode
-	if len(code) == 8 {
-		code = code[:4] + " " + code[4:]
+// claimInstance makes this the one running agent. Right after an update the
+// version being replaced may take a moment to step aside.
+func (a *app) claimInstance() (bool, error) {
+	deadline := time.Now().Add(handoverWait)
+	for {
+		only, release, err := platform.SingleInstance()
+		if err != nil {
+			return false, err
+		}
+		if only {
+			a.releaseInstance = release
+			return true, nil
+		}
+		if !a.opts.afterUpdate || time.Now().After(deadline) {
+			return false, nil
+		}
+		time.Sleep(250 * time.Millisecond)
 	}
-	return "Código de vinculación:\n\n        " + code + "\n\n" +
-		"En el administrador de QuickTable entrá a Impresión > Vincular PC e ingresá este código.\n" +
-		"El código vence en unos minutos; al cerrar este aviso se muestra uno nuevo si todavía hace falta."
 }
 
-// installSelf copies the running program to the agent's own folder, sets it
-// to start with Windows and starts that copy. It reports true when it did, so
-// the caller exits; false when this already is the installed copy.
-func installSelf(dir string) (bool, error) {
-	current, err := os.Executable()
-	if err != nil {
-		return false, err
-	}
-	target := filepath.Join(dir, exeName)
-	if samePath(current, target) {
-		return false, platform.SetAutostart(target)
-	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return false, err
-	}
-	if err := copyFile(current, target); err != nil {
-		// The installed copy is in use: the agent is already running.
-		platform.Notify("El agente de impresión ya está instalado y funcionando en esta PC.\n\nPara reinstalarlo, cerralo primero desde el Administrador de tareas.")
-		return true, nil
-	}
-	if err := platform.SetAutostart(target); err != nil {
-		return false, err
-	}
-	return true, exec.Command(target).Start()
-}
-
-func doUninstall(store config.Store) error {
-	if err := platform.RemoveAutostart(); err != nil {
+// save changes the saved configuration and writes it.
+func (a *app) save(change func(*config.Config) error) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if err := change(&a.saved); err != nil {
 		return err
 	}
-	if err := os.Remove(filepath.Join(store.Dir, "config.json")); err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	platform.Notify("El agente de impresión ya no arranca con Windows y olvidó su vinculación.\n\nRecordá desvincular esta PC también desde el administrador de QuickTable.")
-	return nil
+	return a.store.Save(a.saved)
 }
 
 // openLog logs to agent.log in dir, starting a new file once it gets big.
@@ -204,29 +256,6 @@ func openLog(dir string, console bool) (*slog.Logger, func(), error) {
 		out = io.MultiWriter(file, os.Stderr)
 	}
 	return slog.New(slog.NewTextHandler(out, nil)), func() { _ = file.Close() }, nil
-}
-
-func copyFile(from, to string) error {
-	source, err := os.Open(from)
-	if err != nil {
-		return err
-	}
-	defer source.Close()
-	target, err := os.OpenFile(to, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o700)
-	if err != nil {
-		return err
-	}
-	if _, err := io.Copy(target, source); err != nil {
-		target.Close()
-		return err
-	}
-	return target.Close()
-}
-
-func samePath(a, b string) bool {
-	a, errA := filepath.Abs(a)
-	b, errB := filepath.Abs(b)
-	return errA == nil && errB == nil && strings.EqualFold(filepath.Clean(a), filepath.Clean(b))
 }
 
 func firstNonEmpty(values ...string) string {

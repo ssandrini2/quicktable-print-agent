@@ -1,0 +1,14 @@
+{
+  "name": "quicktable-print-agent",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Release tooling for the QuickTable print agent (the agent itself is Go — see README.md). \"version\" is the agent's version.",
+  "scripts": {
+    "release": "node scripts/release.mjs",
+    "test:release": "node --test scripts/releaseVersion.test.mjs"
+  },
+  "devDependencies": {
+    "@vercel/blob": "^2.8.0"
+  }
+}

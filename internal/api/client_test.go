@@ -99,7 +99,10 @@ func TestClaimDecodesJobs(t *testing.T) {
 func TestReportAndHeartbeat(t *testing.T) {
 	s := newServer(t, map[string]func() (int, string){
 		"/print-agent/jobs/job-1/result": func() (int, string) { return 200, `{"data":{"id":"job-1","status":"PRINTED"}}` },
-		"/print-agent/heartbeat":         func() (int, string) { return 204, "" },
+		"/print-agent/heartbeat": func() (int, string) {
+			return 200, `{"data":{"update":{"version":"1.1.0","url":"https://x/agent.exe","sha256":"abc",
+				"signatures":[{"keyId":"k","signature":"c2ln"}],"manifest":{}},"updateWindow":{"startMinute":180,"endMinute":360}}}`
+		},
 	})
 	client := New(s.URL, "token", "1.0.0")
 
@@ -109,8 +112,15 @@ func TestReportAndHeartbeat(t *testing.T) {
 	if err := client.Report(context.Background(), "job-1", errors.New("printer offline")); err != nil {
 		t.Fatal(err)
 	}
-	if err := client.Heartbeat(context.Background(), nil); err != nil {
+	beat, err := client.Heartbeat(context.Background(), nil, &UpdateFailure{Version: "1.0.9", Error: "it did not start"})
+	if err != nil {
 		t.Fatal(err)
+	}
+	if beat.Update == nil || beat.Update.Version != "1.1.0" || beat.Update.Signatures[0].KeyID != "k" {
+		t.Errorf("update: %+v", beat.Update)
+	}
+	if beat.UpdateWindow != (UpdateWindow{StartMinute: 180, EndMinute: 360}) {
+		t.Errorf("window: %+v", beat.UpdateWindow)
 	}
 
 	if s.requests[0].body["status"] != "PRINTED" {
@@ -119,7 +129,7 @@ func TestReportAndHeartbeat(t *testing.T) {
 	if got := s.requests[1].body; got["status"] != "FAILED" || got["error"] != "printer offline" {
 		t.Errorf("failed report: %+v", got)
 	}
-	if got := s.requests[2].body; got["version"] != "1.0.0" || got["printers"] == nil {
+	if got := s.requests[2].body; got["version"] != "1.0.0" || got["printers"] == nil || got["updateFailure"] == nil {
 		t.Errorf("heartbeat: %+v", got)
 	}
 }

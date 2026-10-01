@@ -12,13 +12,14 @@ import (
 
 	"github.com/quicktable/print-agent/internal/api"
 	"github.com/quicktable/print-agent/internal/escpos"
+	"github.com/quicktable/print-agent/internal/update"
 )
 
 // API is the part of the QuickTable API the agent uses (see api.Client).
 type API interface {
 	StartPairing(ctx context.Context) (api.Pairing, error)
 	PollPairing(ctx context.Context, deviceCode string) (api.PairingStatus, error)
-	Heartbeat(ctx context.Context, printers []api.ReportedPrinter) error
+	Heartbeat(ctx context.Context, printers []api.ReportedPrinter, failure *api.UpdateFailure) (api.HeartbeatResult, error)
 	Claim(ctx context.Context, wait time.Duration) ([]api.Job, error)
 	Report(ctx context.Context, jobID string, printErr error) error
 }
@@ -44,12 +45,24 @@ type Agent struct {
 	Paired   func()
 	Log      *slog.Logger
 
+	// ApplyUpdate (optional: without it the agent never updates) replaces the
+	// running program with the release. When it works it doesn't return — the
+	// new version takes over; an error means the agent carries on as it is.
+	ApplyUpdate func(ctx context.Context, release update.Release) error
+	// FailedUpdate (optional) is the update that was tried and undone, if
+	// any: it is reported to the API and not tried again.
+	FailedUpdate func() *api.UpdateFailure
+	// Now is the PC's clock (time.Now by default).
+	Now func() time.Time
+
 	// ClaimWait is how long a claim with nothing to print is held open (the API caps it).
 	ClaimWait time.Duration
 	// HeartbeatEvery is the heartbeat's period.
 	HeartbeatEvery time.Duration
 	// Sleep waits, or returns early (false) when ctx ends. Replaced in tests.
 	Sleep func(ctx context.Context, d time.Duration) bool
+
+	startedAt time.Time
 }
 
 const (
@@ -61,6 +74,10 @@ const (
 	// A result that couldn't be reported is retried this many times; after
 	// that the job's lease runs out and the API hands it out again.
 	reportAttempts = 3
+	// An agent that just started updates right away, whatever the hour:
+	// starting is already an interruption, and restarting the agent (or the
+	// PC) is how someone at the restaurant forces an update.
+	startupUpdateGrace = 3 * time.Minute
 )
 
 func (a *Agent) defaults() {
@@ -73,6 +90,10 @@ func (a *Agent) defaults() {
 	if a.Sleep == nil {
 		a.Sleep = sleep
 	}
+	if a.Now == nil {
+		a.Now = time.Now
+	}
+	a.startedAt = a.Now()
 }
 
 func sleep(ctx context.Context, d time.Duration) bool {
@@ -98,10 +119,17 @@ func (a *Agent) Run(ctx context.Context) error {
 				return err
 			}
 		}
-		if err := a.work(ctx, a.Connect(token)); errors.Is(err, api.ErrUnauthorized) {
+		release, err := a.work(ctx, a.Connect(token))
+		if errors.Is(err, api.ErrUnauthorized) {
 			a.Log.Warn("unpaired from the admin: pairing again")
 			if err := a.SaveToken(""); err != nil {
 				return fmt.Errorf("forgetting the pairing: %w", err)
+			}
+		}
+		if release != nil {
+			a.Log.Info("updating", "version", release.Version)
+			if err := a.ApplyUpdate(ctx, *release); err != nil {
+				a.Log.Error("the update was not applied", "version", release.Version, "err", err)
 			}
 		}
 	}
@@ -176,17 +204,20 @@ func (a *Agent) awaitApproval(ctx context.Context, client API, pairing api.Pairi
 	}
 }
 
-// work claims and prints until ctx ends or the API stops accepting the token.
-func (a *Agent) work(ctx context.Context, client API) error {
+// work claims and prints until ctx ends, the API stops accepting the token
+// (the error), or an update is due and nothing is waiting to print (the
+// release).
+func (a *Agent) work(ctx context.Context, client API) (*update.Release, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	go a.heartbeats(ctx, client)
+	updates := make(chan update.Release, 1)
+	go a.heartbeats(ctx, client, updates)
 
 	backoff := minBackoff
 	for ctx.Err() == nil {
 		jobs, err := client.Claim(ctx, a.ClaimWait)
 		if errors.Is(err, api.ErrUnauthorized) {
-			return err
+			return nil, err
 		}
 		if err != nil {
 			if ctx.Err() != nil {
@@ -201,15 +232,25 @@ func (a *Agent) work(ctx context.Context, client API) error {
 		}
 		backoff = minBackoff
 		if unauthorized := a.printAll(ctx, client, jobs); unauthorized {
-			return api.ErrUnauthorized
+			return nil, api.ErrUnauthorized
+		}
+		// Updating takes the agent away for a few seconds: only with the
+		// queue empty.
+		if len(jobs) == 0 {
+			select {
+			case release := <-updates:
+				return &release, nil
+			default:
+			}
 		}
 	}
-	return ctx.Err()
+	return nil, ctx.Err()
 }
 
 // heartbeats reports the agent alive, with the PC's printers, now and then
-// every HeartbeatEvery, until ctx ends.
-func (a *Agent) heartbeats(ctx context.Context, client API) {
+// every HeartbeatEvery, until ctx ends. A release the API says to update to
+// goes to updates once it's time to apply it.
+func (a *Agent) heartbeats(ctx context.Context, client API, updates chan<- update.Release) {
 	for {
 		names, err := a.InstalledPrinters()
 		if err != nil {
@@ -222,8 +263,20 @@ func (a *Agent) heartbeats(ctx context.Context, client API) {
 		// Without the list, nothing is reported rather than "no printers":
 		// that would make the API forget them.
 		if err == nil {
-			if err := client.Heartbeat(ctx, printers); err != nil && ctx.Err() == nil {
+			var failure *api.UpdateFailure
+			if a.FailedUpdate != nil {
+				failure = a.FailedUpdate()
+			}
+			result, err := client.Heartbeat(ctx, printers, failure)
+			switch {
+			case err != nil && ctx.Err() == nil:
 				a.Log.Warn("heartbeat failed", "err", err)
+			case err == nil && a.updateDue(result, failure):
+				// One release waits at most: the newest answer replaces it.
+				select {
+				case updates <- *result.Update:
+				default:
+				}
 			}
 		}
 		if !a.Sleep(ctx, a.HeartbeatEvery) {
@@ -310,4 +363,22 @@ func (a *Agent) report(ctx context.Context, client API, job api.Job, printErr er
 			return false
 		}
 	}
+}
+
+// updateDue reports whether the heartbeat's release should be applied now:
+// there is one, it isn't the one that already failed, and it is either the
+// agent's first minutes running or the restaurant's update window.
+func (a *Agent) updateDue(result api.HeartbeatResult, failed *api.UpdateFailure) bool {
+	if a.ApplyUpdate == nil || result.Update == nil {
+		return false
+	}
+	if failed != nil && failed.Version == result.Update.Version {
+		return false
+	}
+	now := a.Now()
+	if now.Sub(a.startedAt) < startupUpdateGrace {
+		return true
+	}
+	window := result.UpdateWindow
+	return update.InWindow(now.Hour()*60+now.Minute(), window.StartMinute, window.EndMinute)
 }

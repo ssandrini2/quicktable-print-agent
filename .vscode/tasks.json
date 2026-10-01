@@ -1,0 +1,92 @@
+{
+  // Terminal → Run Task… (or Ctrl+Shift+P → "Tasks: Run Task").
+  //
+  // The agent's version lives in package.json ("version"). "Publish agent"
+  // bumps it (it asks patch/minor/major/beta); the local tasks build "dev".
+  //
+  // Publishing rules (scripts/releaseVersion.mjs): a final version only from
+  // main, committed and identical to origin/main; a beta (x.y.z-beta.N) from any
+  // branch, committed and pushed. The version bump is committed and tagged (vX)
+  // locally, built from that commit, and pushed once the API accepted the
+  // release; a failure before that removes the commit and tag.
+  //
+  // Publishing IS the rollout: a final version reaches every agent on its own; a
+  // beta only the agents marked for test builds in /staff/print-agents. See
+  // docs/updates.md.
+  "version": "2.0.0",
+  "options": {
+    "env": {
+      // The production API: what the agent is built to talk to and published to.
+      "QT_API_URL": "https://quicktable-api.vercel.app"
+    }
+  },
+  "tasks": [
+    {
+      "label": "Tests",
+      "detail": "go test ./... and the release script's own tests",
+      "type": "shell",
+      "command": "go test ./... && npm run test:release",
+      "group": { "kind": "test", "isDefault": true },
+      "problemMatcher": ["$go"],
+      "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
+    },
+    {
+      "label": "Agent: build (local)",
+      "detail": "Builds dist/quicktable-print-agent.exe as version \"dev\" against http://localhost:3000 (never updates itself)",
+      "type": "shell",
+      "command": "go build -trimpath -ldflags \"-H windowsgui\" -o dist/quicktable-print-agent.exe ./cmd/agent",
+      "group": { "kind": "build", "isDefault": true },
+      "problemMatcher": ["$go"],
+      "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
+    },
+    {
+      "label": "Agent: run (local API)",
+      "detail": "Runs the agent from source against http://localhost:3000, without installing it, logging to the console",
+      "type": "shell",
+      "command": "go run ./cmd/agent --no-install --console",
+      "options": { "env": { "QT_PRINT_AGENT_API_URL": "http://localhost:3000" } },
+      "isBackground": true,
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
+    },
+    {
+      "label": "Virtual printer",
+      "detail": "A fake network printer on 127.0.0.1:9100: shows every ticket as text (and keeps it in tickets/)",
+      "type": "shell",
+      "command": "go run ./cmd/virtual-printer",
+      "isBackground": true,
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
+    },
+    {
+      "label": "Publish agent",
+      "detail": "Bumps the version, tests, builds and publishes the agent to the API (staff login; 2FA code only for a final version)",
+      "type": "process",
+      "command": "node",
+      "args": ["scripts/release.mjs", "--bump", "${input:bump}", "--notes", "${input:notes}"],
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "dedicated", "clear": true, "focus": true }
+    }
+  ],
+  "inputs": [
+    {
+      "id": "bump",
+      "type": "pickString",
+      "description": "Which version to publish?",
+      "options": [
+        { "label": "beta: test build, any branch — only agents marked for test builds (1.4.2 → 1.4.3-beta.1 → 1.4.3-beta.2)", "value": "prerelease" },
+        { "label": "patch: fixes — EVERY agent (1.4.2 → 1.4.3; 1.4.3-beta.2 → 1.4.3)", "value": "patch" },
+        { "label": "minor: new features — EVERY agent (1.4.2 → 1.5.0)", "value": "minor" },
+        { "label": "major: big change — EVERY agent (1.4.2 → 2.0.0)", "value": "major" },
+        { "label": "current one, no bump (e.g. retry a failed publish)", "value": "none" }
+      ],
+      "default": "prerelease"
+    },
+    {
+      "id": "notes",
+      "type": "promptString",
+      "description": "Release notes (optional, shown in the staff console)",
+      "default": ""
+    }
+  ]
+}
