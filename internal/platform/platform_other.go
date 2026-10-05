@@ -43,3 +43,6 @@ func RemoveUninstall() error { return nil }
 
 // RemoveDirLater does nothing.
 func RemoveDirLater(string) error { return nil }
+
+// AskText finds nobody to ask.
+func AskText(string, string, string, string) (string, bool) { return "", false }

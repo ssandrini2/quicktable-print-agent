@@ -17,8 +17,7 @@ import (
 
 // API is the part of the QuickTable API the agent uses (see api.Client).
 type API interface {
-	StartPairing(ctx context.Context) (api.Pairing, error)
-	PollPairing(ctx context.Context, deviceCode string) (api.PairingStatus, error)
+	ClaimInstall(ctx context.Context, code string) (token string, err error)
 	Heartbeat(ctx context.Context, printers []api.ReportedPrinter, failure *api.UpdateFailure) (api.HeartbeatResult, error)
 	Claim(ctx context.Context, wait time.Duration) ([]api.Job, error)
 	Report(ctx context.Context, jobID string, printErr error) error
@@ -36,14 +35,23 @@ type Agent struct {
 	Send func(ctx context.Context, connection, address string, data []byte) error
 	// InstalledPrinters lists the printers Windows has (see transport.InstalledPrinters).
 	InstalledPrinters func() ([]string, error)
-	// BeforeCode (optional) waits until a new pairing code can be shown — the
-	// notice of the previous one was closed. False when ctx ended first.
-	BeforeCode func(ctx context.Context) bool
-	// ShowCode tells the person at the PC the code to enter in the admin;
-	// Paired tells them it worked. Neither may block.
-	ShowCode func(userCode string)
-	Paired   func()
-	Log      *slog.Logger
+	// InstallCode is the code the downloaded program carried in its file name
+	// (an install started in the admin), "" when there is none;
+	// ClearInstallCode forgets it once it was tried.
+	InstallCode      func() string
+	ClearInstallCode func() error
+	// AskCode asks the person to type the code the admin shows. It blocks
+	// until they answer; false means "not now". WrongCode tells them the code
+	// they typed isn't good, ConnectRequested waits until they ask to connect
+	// after a "not now" (false when ctx ended first), and Paired tells them
+	// it worked.
+	AskCode          func(ctx context.Context) (code string, ok bool)
+	WrongCode        func()
+	ConnectRequested func(ctx context.Context) bool
+	Paired           func()
+	// Status (optional) is told how the agent is doing, whenever it changes or not.
+	Status func(State)
+	Log    *slog.Logger
 
 	// ApplyUpdate (optional: without it the agent never updates) replaces the
 	// running program with the release. When it works it doesn't return — the
@@ -64,6 +72,18 @@ type Agent struct {
 
 	startedAt time.Time
 }
+
+// State is how the agent is doing, as the person at the PC needs to know it.
+type State int
+
+const (
+	// Unpaired: not connected to any restaurant.
+	Unpaired State = iota
+	// Connected: paired, and the API answers.
+	Connected
+	// Offline: the API can't be reached; it keeps trying.
+	Offline
+)
 
 const (
 	defaultClaimWait      = 25 * time.Second
@@ -136,71 +156,84 @@ func (a *Agent) Run(ctx context.Context) error {
 	return ctx.Err()
 }
 
-// pair shows a code and waits until a manager approves it, asking for a new
-// code whenever one expires. It returns the token, already saved.
+// pair gets the agent its token, already saved, by trading an install's code
+// for it. The code normally came in the downloaded program's file name and
+// nobody sees it. Without one — the file lost its name, or this PC was
+// removed from the admin — the person is asked to type the one the admin
+// shows; if they'd rather not now, the agent waits until they ask to connect.
 func (a *Agent) pair(ctx context.Context) (string, error) {
 	client := a.Connect("")
-	backoff := minBackoff
-	for {
-		// Nobody at the PC means no new codes: they'd pile up unread.
-		if a.BeforeCode != nil && !a.BeforeCode(ctx) {
+	if code := a.InstallCode(); code != "" {
+		token, err := a.claim(ctx, client, code)
+		if clearErr := a.ClearInstallCode(); clearErr != nil {
+			return "", fmt.Errorf("saving the pairing: %w", clearErr)
+		}
+		switch {
+		case err == nil:
+			return token, a.paired(token)
+		case ctx.Err() != nil:
 			return "", ctx.Err()
 		}
-		pairing, err := client.StartPairing(ctx)
-		if err != nil {
-			a.Log.Warn("could not start pairing", "err", err)
-			if !a.Sleep(ctx, backoff) {
+		a.Log.Warn("the install code is no longer valid: asking for one")
+	}
+
+	a.setStatus(Unpaired)
+	for ask := true; ; ask = false {
+		// Asked once on its own; after a "not now", when the person says so.
+		if !ask && !a.ConnectRequested(ctx) {
+			return "", ctx.Err()
+		}
+		for {
+			code, ok := a.AskCode(ctx)
+			if !ok {
+				break
+			}
+			token, err := a.claim(ctx, client, code)
+			if err == nil {
+				return token, a.paired(token)
+			}
+			if ctx.Err() != nil {
 				return "", ctx.Err()
 			}
-			backoff = min(backoff*2, maxBackoff)
-			continue
+			a.WrongCode()
 		}
-		backoff = minBackoff
-		a.Log.Info("pairing started: waiting for the code to be approved in the admin")
-		a.ShowCode(pairing.UserCode)
-
-		token, err := a.awaitApproval(ctx, client, pairing)
-		if err != nil {
-			return "", err
+		if ctx.Err() != nil {
+			return "", ctx.Err()
 		}
-		if token == "" {
-			a.Log.Info("the pairing code expired: asking for a new one")
-			continue
-		}
-		if err := a.SaveToken(token); err != nil {
-			return "", fmt.Errorf("saving the pairing: %w", err)
-		}
-		a.Log.Info("paired")
-		a.Paired()
-		return token, nil
 	}
 }
 
-// awaitApproval polls until the code is approved (the token) or stops being
-// usable ("").
-func (a *Agent) awaitApproval(ctx context.Context, client API, pairing api.Pairing) (string, error) {
-	interval := time.Duration(pairing.PollIntervalSeconds) * time.Second
-	if interval <= 0 {
-		interval = 3 * time.Second
-	}
-	deadline := time.Now().Add(time.Duration(pairing.ExpiresInSeconds) * time.Second)
+// claim trades a code for the token, waiting out a connection that is down.
+// Its error is api.ErrNotFound for a code that isn't good (anymore), or ctx's.
+func (a *Agent) claim(ctx context.Context, client API, code string) (string, error) {
+	backoff := minBackoff
 	for {
-		if !a.Sleep(ctx, interval) {
+		token, err := client.ClaimInstall(ctx, code)
+		if err == nil || errors.Is(err, api.ErrNotFound) {
+			return token, err
+		}
+		a.Log.Warn("could not reach the API to connect", "err", err)
+		a.setStatus(Offline)
+		if !a.Sleep(ctx, backoff) {
 			return "", ctx.Err()
 		}
-		status, err := client.PollPairing(ctx, pairing.DeviceCode)
-		switch {
-		case err != nil:
-			// Offline for a moment: the code is still good until it expires.
-			a.Log.Warn("could not check the pairing", "err", err)
-			if pairing.ExpiresInSeconds > 0 && time.Now().After(deadline) {
-				return "", nil
-			}
-		case status.Status == "approved" && status.Token != "":
-			return status.Token, nil
-		case status.Status != "pending":
-			return "", nil
-		}
+		backoff = min(backoff*2, maxBackoff)
+	}
+}
+
+func (a *Agent) paired(token string) error {
+	if err := a.SaveToken(token); err != nil {
+		return fmt.Errorf("saving the pairing: %w", err)
+	}
+	a.Log.Info("paired")
+	a.Paired()
+	return nil
+}
+
+// setStatus tells whoever shows it (the tray icon) how the agent is doing.
+func (a *Agent) setStatus(state State) {
+	if a.Status != nil {
+		a.Status(state)
 	}
 }
 
@@ -224,6 +257,7 @@ func (a *Agent) work(ctx context.Context, client API) (*update.Release, error) {
 				break
 			}
 			a.Log.Warn("could not ask for jobs", "err", err)
+			a.setStatus(Offline)
 			if !a.Sleep(ctx, backoff) {
 				break
 			}
@@ -231,6 +265,7 @@ func (a *Agent) work(ctx context.Context, client API) (*update.Release, error) {
 			continue
 		}
 		backoff = minBackoff
+		a.setStatus(Connected)
 		if unauthorized := a.printAll(ctx, client, jobs); unauthorized {
 			return nil, api.ErrUnauthorized
 		}

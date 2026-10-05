@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/quicktable/print-agent/internal/agent"
@@ -22,6 +23,7 @@ import (
 	"github.com/quicktable/print-agent/internal/i18n"
 	"github.com/quicktable/print-agent/internal/platform"
 	"github.com/quicktable/print-agent/internal/transport"
+	"github.com/quicktable/print-agent/internal/tray"
 	"github.com/quicktable/print-agent/internal/update"
 )
 
@@ -164,48 +166,83 @@ func (a *app) run(loadErr error) error {
 		}()
 	}
 
-	// One pairing notice on screen at a time: closed once the person closes it.
-	noticeClosed := make(chan struct{})
-	close(noticeClosed)
-	worker := &agent.Agent{
-		Connect:   func(token string) agent.API { return api.New(apiURL, token, version) },
-		LoadToken: func() string { a.mu.Lock(); defer a.mu.Unlock(); return a.saved.PairingToken() },
-		SaveToken: func(token string) error {
-			return a.save(func(c *config.Config) error { return c.SetPairingToken(token) })
-		},
-		Send:              transport.Send,
-		InstalledPrinters: transport.InstalledPrinters,
-		BeforeCode: func(ctx context.Context) bool {
+	// The person asking, from the icon's menu, to connect this PC.
+	connectRequests := make(chan struct{}, 1)
+	var shown atomic.Int32
+	shown.Store(-1)
+	var workErr error
+	tray.Run(tray.Options{
+		Title:        a.texts.TrayTitle(version),
+		ConnectLabel: a.texts.MenuConnect,
+		OnConnect: func() {
 			select {
-			case <-noticeClosed:
-				return true
-			case <-ctx.Done():
-				return false
+			case connectRequests <- struct{}{}:
+			default:
 			}
 		},
-		ShowCode: func(userCode string) {
-			closed := make(chan struct{})
-			noticeClosed = closed
-			go func() {
-				defer close(closed)
-				platform.Notify(a.texts.Title, a.texts.PairingCode(userCode))
-			}()
+		ExitLabel: a.texts.MenuExit,
+		OnExit: func() {
+			if platform.Confirm(a.texts.Title, a.texts.ExitPrompt) {
+				log.Info("closed from the tray icon")
+				stop()
+			}
 		},
-		Paired:       func() { go platform.Notify(a.texts.Title, a.texts.Paired) },
-		FailedUpdate: a.failedUpdate,
-		Log:          log,
-	}
-	if installs {
-		worker.ApplyUpdate = func(ctx context.Context, release update.Release) error {
-			return a.applyUpdate(ctx, exe, release)
+	}, func(icon *tray.Tray) {
+		worker := &agent.Agent{
+			Connect:   func(token string) agent.API { return api.New(apiURL, token, version) },
+			LoadToken: func() string { a.mu.Lock(); defer a.mu.Unlock(); return a.saved.PairingToken() },
+			SaveToken: func(token string) error {
+				return a.save(func(c *config.Config) error { return c.SetPairingToken(token) })
+			},
+			InstallCode: func() string { a.mu.Lock(); defer a.mu.Unlock(); return a.saved.InstallCode },
+			ClearInstallCode: func() error {
+				return a.save(func(c *config.Config) error { c.InstallCode = ""; return nil })
+			},
+			Send:              transport.Send,
+			InstalledPrinters: transport.InstalledPrinters,
+			AskCode: func(context.Context) (string, bool) {
+				return platform.AskText(a.texts.Title, a.texts.CodePrompt, a.texts.OK, a.texts.NotNow)
+			},
+			WrongCode: func() { platform.Notify(a.texts.Title, a.texts.WrongCode) },
+			ConnectRequested: func(ctx context.Context) bool {
+				select {
+				case <-connectRequests:
+					return true
+				case <-ctx.Done():
+					return false
+				}
+			},
+			Paired: func() { go platform.Notify(a.texts.Title, a.texts.Paired) },
+			Status: func(state agent.State) {
+				// Told on every request that works: only a change touches the icon.
+				if shown.Swap(int32(state)) == int32(state) {
+					return
+				}
+				switch state {
+				case agent.Connected:
+					icon.SetStatus(a.texts.StatusConnected)
+				case agent.Offline:
+					icon.SetStatus(a.texts.StatusOffline)
+				default:
+					icon.SetStatus(a.texts.StatusUnpaired)
+				}
+				icon.OfferConnect(state == agent.Unpaired)
+			},
+			FailedUpdate: a.failedUpdate,
+			Log:          log,
 		}
-	}
-	err = worker.Run(ctx)
-	log.Info("print agent stopped", "reason", err)
+		if installs {
+			worker.ApplyUpdate = func(ctx context.Context, release update.Release) error {
+				return a.applyUpdate(ctx, exe, release)
+			}
+		}
+		workErr = worker.Run(ctx)
+	})
+	log.Info("print agent stopped", "reason", workErr)
 	if ctx.Err() != nil {
 		return nil
 	}
-	return err
+	return workErr
 }
 
 // claimInstance makes this the one running agent. Right after an update the

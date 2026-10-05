@@ -19,6 +19,10 @@ import (
 // ErrUnauthorized means the agent's token is no longer good: it was unpaired.
 var ErrUnauthorized = errors.New("the agent is not paired (anymore)")
 
+// ErrNotFound means the API doesn't know what was asked for — for an install,
+// a code that isn't good (anymore).
+var ErrNotFound = errors.New("not found")
+
 // ErrNotHeld means the job isn't this agent's anymore (its lease ran out, or
 // it was cancelled): there is nothing to report.
 var ErrNotHeld = errors.New("the job is not held by this agent")
@@ -34,7 +38,7 @@ type Client struct {
 	http    *http.Client
 }
 
-// New returns a client for the API at baseURL. token is empty until paired.
+// New returns a client for the API at baseURL. token is empty until the install is claimed.
 func New(baseURL, token, version string) *Client {
 	return &Client{
 		baseURL: strings.TrimRight(baseURL, "/"),
@@ -42,20 +46,6 @@ func New(baseURL, token, version string) *Client {
 		version: version,
 		http:    &http.Client{},
 	}
-}
-
-// Pairing is a started pairing: the agent shows UserCode and polls with DeviceCode.
-type Pairing struct {
-	DeviceCode          string `json:"deviceCode"`
-	UserCode            string `json:"userCode"`
-	ExpiresInSeconds    int    `json:"expiresInSeconds"`
-	PollIntervalSeconds int    `json:"pollIntervalSeconds"`
-}
-
-// PairingStatus is "pending", "expired" or "approved" (then with the token).
-type PairingStatus struct {
-	Status string `json:"status"`
-	Token  string `json:"token"`
 }
 
 // Printer is where a job prints.
@@ -83,18 +73,15 @@ type ReportedPrinter struct {
 	Status string `json:"status,omitempty"`
 }
 
-// StartPairing asks for a new pairing code.
-func (c *Client) StartPairing(ctx context.Context) (Pairing, error) {
-	var pairing Pairing
-	err := c.post(ctx, "/print-agent/pair/start", nil, &pairing, 30*time.Second)
-	return pairing, err
-}
-
-// PollPairing asks whether a manager approved the code yet.
-func (c *Client) PollPairing(ctx context.Context, deviceCode string) (PairingStatus, error) {
-	var status PairingStatus
-	err := c.post(ctx, "/print-agent/pair/poll", map[string]string{"deviceCode": deviceCode}, &status, 30*time.Second)
-	return status, err
+// ClaimInstall trades an install's code — the long one from the program's
+// file name, or the short one the admin shows — for the agent's token.
+// ErrNotFound means the code isn't good (anymore).
+func (c *Client) ClaimInstall(ctx context.Context, code string) (string, error) {
+	var claimed struct {
+		Token string `json:"token"`
+	}
+	err := c.post(ctx, "/print-agent/claim", map[string]string{"code": code}, &claimed, 30*time.Second)
+	return claimed.Token, err
 }
 
 // UpdateFailure is an update the agent tried and undid.
@@ -186,6 +173,8 @@ func (c *Client) post(ctx context.Context, path string, body, out any, timeout t
 	switch {
 	case response.StatusCode == http.StatusUnauthorized:
 		return ErrUnauthorized
+	case response.StatusCode == http.StatusNotFound:
+		return ErrNotFound
 	case response.StatusCode == http.StatusConflict:
 		return ErrNotHeld
 	case response.StatusCode >= 300:

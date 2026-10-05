@@ -16,6 +16,10 @@ type Config struct {
 	APIURL string `json:"apiUrl,omitempty"`
 	// Token is the pairing token, encrypted for this Windows user (see protect).
 	Token string `json:"token,omitempty"`
+	// InstallCode is the code the downloaded program carried in its file
+	// name: an install approved in advance in the admin, traded for the token
+	// the first time the agent runs.
+	InstallCode string `json:"installCode,omitempty"`
 	// Lang is the language chosen at install ("es" or "en").
 	Lang string `json:"lang,omitempty"`
 	// FailedUpdate is an update that was tried and undone: it isn't tried
