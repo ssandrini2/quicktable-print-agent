@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -15,6 +16,11 @@ import (
 
 // How long a reinstall waits for the running agent to let go of its file.
 const replaceWait = 10 * time.Second
+
+// The admin names the download "QuickTable-Impresion-<code>.exe": the code is
+// an install approved in advance for one restaurant (64 hex characters; the
+// browser may add " (1)" and the like around it).
+var installCodeInName = regexp.MustCompile(`[0-9a-f]{64}`)
 
 // install makes the downloaded program the installed one: it asks, copies
 // itself to the agent's own folder, sets it to start with Windows, lists it
@@ -49,11 +55,23 @@ func (a *app) install() (done bool, err error) {
 	if err := copyWithRetry(current, target, replaceWait); err != nil {
 		return false, err
 	}
-	// The agent talks in the language it was installed in.
-	if lang, ok := i18n.Parse(a.opts.lang); ok {
-		if err := a.save(func(c *config.Config) error { c.Lang = string(lang); return nil }); err != nil {
-			return false, err
+	// What the installed copy starts from: the language it was installed in,
+	// and the restaurant this download was made for — which replaces whatever
+	// pairing an earlier install left.
+	lang, hasLang := i18n.Parse(a.opts.lang)
+	installCode := installCodeInName.FindString(filepath.Base(current))
+	err = a.save(func(c *config.Config) error {
+		if hasLang {
+			c.Lang = string(lang)
 		}
+		if installCode != "" {
+			c.InstallCode = installCode
+			return c.SetPairingToken("")
+		}
+		return nil
+	})
+	if err != nil {
+		return false, err
 	}
 	if err := a.register(target); err != nil {
 		return false, err

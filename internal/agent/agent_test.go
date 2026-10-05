@@ -121,9 +121,14 @@ type harness struct {
 	sent    []sent
 	offline map[string]bool // printer addresses that fail
 	codes   []string
-	paired  int
-	tokens  []string // tokens the agent connected with
-	cancel  context.CancelFunc
+	// The code the downloaded program carried, and what became of the wait for someone to ask for one.
+	installCode string
+	nobodyAsks  bool
+	unpaired    int
+	states      []State
+	paired      int
+	tokens      []string // tokens the agent connected with
+	cancel      context.CancelFunc
 }
 
 func newHarness(t *testing.T, token string) *harness {
@@ -156,6 +161,34 @@ func newHarness(t *testing.T, token string) *harness {
 			return nil
 		},
 		InstalledPrinters: func() ([]string, error) { return []string{"EPSON TM-T20"}, nil },
+		InstallCode: func() string {
+			h.mu.Lock()
+			defer h.mu.Unlock()
+			return h.installCode
+		},
+		ClearInstallCode: func() error {
+			h.mu.Lock()
+			defer h.mu.Unlock()
+			h.installCode = ""
+			return nil
+		},
+		Unpaired: func() {
+			h.mu.Lock()
+			defer h.mu.Unlock()
+			h.unpaired++
+		},
+		// Someone asks for a code right away, unless the test says nobody does.
+		CodeRequested: func(ctx context.Context) bool {
+			if h.nobodyAsks {
+				<-ctx.Done()
+			}
+			return ctx.Err() == nil
+		},
+		Status: func(state State) {
+			h.mu.Lock()
+			defer h.mu.Unlock()
+			h.states = append(h.states, state)
+		},
 		ShowCode: func(code string) {
 			h.mu.Lock()
 			defer h.mu.Unlock()
@@ -394,5 +427,46 @@ func TestReportsAFailedUpdateAndDoesNotRetryIt(t *testing.T) {
 
 	if len(h.api.failures) == 0 || h.api.failures[0] == nil || h.api.failures[0].Version != "1.1.0" {
 		t.Fatalf("reported %v", h.api.failures)
+	}
+}
+
+func TestInstallCodePairsWithoutShowingACode(t *testing.T) {
+	h := newHarness(t, "")
+	h.installCode = "the-code-in-the-file-name"
+	h.api.polls = []api.PairingStatus{{Status: "approved", Token: "fresh-token"}}
+	h.api.claims = [][]api.Job{{job("a", "kitchen", "10.0.0.1:9100")}}
+
+	h.run()
+
+	if h.token != "fresh-token" || h.installCode != "" || h.paired != 1 {
+		t.Fatalf("token %q, install code %q, paired %d", h.token, h.installCode, h.paired)
+	}
+	if len(h.codes) != 0 || h.unpaired != 0 {
+		t.Errorf("nobody should be asked anything: codes %v, unpaired notices %d", h.codes, h.unpaired)
+	}
+	if len(h.sent) != 1 || h.states[len(h.states)-1] != Connected {
+		t.Errorf("sent %d tickets, states %v", len(h.sent), h.states)
+	}
+}
+
+func TestAnInstallCodeThatExpiredLeavesTheAgentWaiting(t *testing.T) {
+	h := newHarness(t, "")
+	h.installCode = "stale"
+	h.nobodyAsks = true
+	h.api.polls = []api.PairingStatus{{Status: "expired"}}
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	_ = h.agent.Run(ctx)
+
+	if h.installCode != "" || h.token != "" {
+		t.Fatalf("install code %q, token %q", h.installCode, h.token)
+	}
+	// It says so once and shows no code until someone asks for one.
+	if h.unpaired != 1 || len(h.codes) != 0 || h.api.startedPairs != 0 {
+		t.Errorf("unpaired notices %d, codes %v, pairings started %d", h.unpaired, h.codes, h.api.startedPairs)
+	}
+	if len(h.states) == 0 || h.states[len(h.states)-1] != Unpaired {
+		t.Errorf("states %v", h.states)
 	}
 }

@@ -15,21 +15,44 @@ and the updater. There is no separate setup program.
 
 What the restaurant does:
 
-1. In the admin: **Impresión → Vincular PC → Descargar agente**. That is always the newest final
-   release (`GET /printing/agent-installer`).
-2. Run the downloaded file and accept. No administrator password.
-3. Enter the code it shows, back in the admin.
+1. In the admin: **Impresión → Instalar programa de impresión**. The download is the newest final
+   release, saved under a name that ties it to that restaurant.
+2. Open the downloaded file and accept. No administrator password, no code to type.
+
+The PC shows up as connected in the admin, and the setup goes on there: areas, then printers.
 
 ```mermaid
-flowchart TD
-  A[Run the downloaded .exe] --> B{Already installed?}
-  B -- no --> C["Ask: install on this PC?"]
-  B -- yes --> D["Ask: replace with this version?"]
-  C -- yes --> E
-  D -- yes --> S[Ask the running agent to stop] --> E
-  E["Copy to %LOCALAPPDATA%\QuickTable\PrintAgent"] --> F[Start with Windows · list in Installed apps]
-  F --> G[Start the installed copy] --> H[Show the pairing code]
+sequenceDiagram
+  participant M as Manager
+  participant AD as Admin
+  participant API as API
+  participant F as Downloaded .exe
+  participant AG as Installed agent
+  M->>AD: Instalar programa de impresión
+  AD->>API: POST /printing/agents/install
+  API-->>AD: pairing approved in advance · URL · file name with its code
+  AD-->>M: saves QuickTable-Impresion-<code>.exe
+  M->>F: open it → "Install on this PC?" → yes
+  F->>F: copy to %LOCALAPPDATA% · start with Windows · list in Installed apps
+  F->>AG: write the code to config.json · start the installed copy
+  AG->>API: POST /print-agent/pair/poll (the code)
+  API-->>AG: token
+  AG->>API: heartbeat → "Conectada" in the admin
 ```
+
+**How it knows its restaurant.** The program is one generic file. The admin starts an install — a
+pairing the API approves in advance — and saves the download as `QuickTable-Impresion-<64 hex>.exe`.
+The program looks for that code in its own file name (`installCodeInName` in `cmd/agent/install.go`),
+keeps it in `config.json`, and its first run trades it for its token. The code is good for one hour
+and for one install; a browser adding ` (1)` to the name doesn't matter.
+
+**When that doesn't work** — the file was renamed, or an hour passed — the program installs but
+isn't connected: it says so once, and its tray icon shows "Sin conectar". Two ways out: download it
+again from the admin (it replaces the installed one), or the fallback: icon → **Conectar con un
+código**, and in the admin **Impresión → Tengo un código**.
+
+**Removing the PC from the admin** leaves the program installed and unconnected, in that same state.
+Installing again from the admin reconnects it.
 
 Everything is per user (`HKCU`), which is why no administrator rights are needed:
 
@@ -39,17 +62,23 @@ Everything is per user (`HKCU`), which is why no administrator rights are needed
 | Start with Windows | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` → `QuickTablePrintAgent` |
 | Installed apps entry | `HKCU\…\Uninstall\QuickTablePrintAgent` (uninstall = the program's own `--uninstall`) |
 
+**The tray icon.** While it runs, the program sits in the Windows notification area (next to the
+clock; Windows may tuck it behind the `^` arrow). Its menu shows the version and the state —
+connected, no internet, or not connected to a restaurant — and **Cerrar**, which first warns that
+orders stop printing until it is opened again or the PC restarts. The icon is
+`internal/tray/icon.ico`, drawn by `scripts/make-icon.py`.
+
 **Language.** Every message exists in Spanish and English (`internal/i18n`). Spanish is the default;
 an English Windows gets English; `--lang es|en` forces one, and an install run with `--lang`
 remembers it. The Yes/No buttons are Windows' own.
 
 **Uninstalling.** Windows Settings → Apps → *QuickTable - Agente de impresión* → Uninstall (or
 `quicktable-print-agent.exe --uninstall`). It stops the running agent, removes the two registry
-entries and deletes the folder, pairing included. The PC still has to be unpaired in the admin.
+entries and deletes the folder, pairing included. The PC still has to be removed in the admin.
 
-**SmartScreen.** The executable isn't code-signed yet, so Windows shows "Windows protected your PC"
-the first time: *More info → Run anyway*. Removing that warning takes an Authenticode certificate
-(see [Not built](#not-built)). Updates don't go through SmartScreen: the agent downloads them itself.
+**SmartScreen.** The executable isn't code-signed, so Windows shows "Windows protected your PC" the
+first time: *More info → Run anyway*. Updates don't go through SmartScreen: the agent downloads them
+itself.
 
 ## Releasing a version
 
@@ -160,8 +189,8 @@ that PC's agent (sign out and in, or restart the PC).
 - **PC vinculadas** — every restaurant's PC: version, whether it's up to date / pending / failed (with
   the error), last heartbeat, and the **Recibe pruebas** switch.
 
-The restaurant's own admin (Impresión) only shows whether its PC is connected and, if an update
-failed, a notice to contact support.
+The restaurant's own admin (Impresión) only shows whether its PC is connected, its version and, if
+an update failed, a notice to contact support.
 
 ## Trying the whole flow locally
 
@@ -180,7 +209,7 @@ With the API running locally (`RMS_DRIVER=mock`) and a staff account:
    npm run release -- --api http://localhost:3000 --bump prerelease --trust-key local:<that hex>
    ```
 
-3. Run `dist/quicktable-print-agent.exe`, accept the install, pair it from the admin.
+3. In the admin, **Impresión → Instalar programa de impresión**, and open the download.
 4. In the staff console mark the PC as **Recibe pruebas**, then publish another beta the same way.
 5. Restart the agent (or wait for the window): within a minute it downloads, swaps and restarts.
    `agent.log` in `%LOCALAPPDATA%\QuickTable\PrintAgent` shows each step; the staff console shows the
@@ -195,5 +224,4 @@ With the API running locally (`RMS_DRIVER=mock`) and a staff account:
   reputation over time; EV doesn't). Once there is one, `signtool sign` goes in `build()` in
   `scripts/release.mjs`, right after `go build` — the API hashes and signs whatever file it receives,
   so nothing else changes.
-- **A tray icon** with status and "Exit".
 - **An "update now" order from the staff console.** Today: the window, or restarting the agent.

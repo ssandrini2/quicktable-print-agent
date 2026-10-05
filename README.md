@@ -26,14 +26,19 @@ sequenceDiagram
 
 - **Installs itself**: the downloaded `.exe` asks, copies itself to the user's folder and starts with
   Windows. No administrator rights. Messages in Spanish (default) or English.
-- **Pairs once** with a restaurant: it shows a code, a manager enters it in the admin
-  (Impresión → Vincular PC).
+- **Connects on its own**: downloaded from the admin (Impresión → Instalar programa de impresión),
+  its file name carries the code that ties it to that restaurant. Nobody types anything; a code typed
+  in the admin is only the fallback.
+- **Shows it is running**: an icon next to the Windows clock, with the version, the state and the way
+  to close it.
 - **Prints** every job the API hands it and reports the result. A printer that is off fails its
   jobs fast; the API retries them with a backoff.
-- **Reports** the printers Windows has installed (every 60 s), so the admin can pick them.
+- **Reports** the printers Windows has installed (every 60 s): the admin offers them when a printer is
+  added — none is added on its own.
 - **Updates itself** to the release the API says, after checking its signature, and goes back to the
   version it had if the new one doesn't start.
-- If it is unpaired from the admin, it goes back to showing a pairing code.
+- If its PC is removed from the admin, it stays installed, unconnected, until it is installed again
+  from there (or connected with a code).
 
 Printers are reached in two ways, chosen per printer in the admin:
 
@@ -57,7 +62,8 @@ internal/update/      release signature check, download, swap, revert
 internal/i18n/        every message, in Spanish and English
 internal/config/      state file and token protection (DPAPI)
 internal/platform/    message boxes, autostart, installed-apps entry, single instance
-scripts/              release.mjs: build + publish a version
+internal/tray/        the icon in the Windows notification area
+scripts/              release.mjs: build + publish a version · make-icon.py: the tray icon
 ```
 
 ## Develop

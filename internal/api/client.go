@@ -19,6 +19,10 @@ import (
 // ErrUnauthorized means the agent's token is no longer good: it was unpaired.
 var ErrUnauthorized = errors.New("the agent is not paired (anymore)")
 
+// ErrNotFound means the API doesn't know what was asked for — for a pairing,
+// a code that doesn't exist (anymore).
+var ErrNotFound = errors.New("not found")
+
 // ErrNotHeld means the job isn't this agent's anymore (its lease ran out, or
 // it was cancelled): there is nothing to report.
 var ErrNotHeld = errors.New("the job is not held by this agent")
@@ -186,6 +190,8 @@ func (c *Client) post(ctx context.Context, path string, body, out any, timeout t
 	switch {
 	case response.StatusCode == http.StatusUnauthorized:
 		return ErrUnauthorized
+	case response.StatusCode == http.StatusNotFound:
+		return ErrNotFound
 	case response.StatusCode == http.StatusConflict:
 		return ErrNotHeld
 	case response.StatusCode >= 300:

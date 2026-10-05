@@ -51,11 +51,22 @@ type Texts struct {
 	InstallPrompt   string
 	AlreadyRunning  string
 	Paired          string
+	NotConnected    string
 	UninstallPrompt string
 	Uninstalled     string
-	pairingCode     string
-	startFailed     string
-	replaceRunning  string
+	ExitPrompt      string
+
+	// The tray icon's menu.
+	StatusConnected string
+	StatusOffline   string
+	StatusUnpaired  string
+	MenuConnect     string
+	MenuExit        string
+
+	trayTitle      string
+	pairingCode    string
+	startFailed    string
+	replaceRunning string
 }
 
 // PairingCode is the notice with the code to enter in the admin.
@@ -66,6 +77,9 @@ func (t Texts) PairingCode(userCode string) string {
 	}
 	return fmt.Sprintf(t.pairingCode, code)
 }
+
+// TrayTitle names the program and its version.
+func (t Texts) TrayTitle(version string) string { return fmt.Sprintf(t.trayTitle, version) }
 
 // StartFailed says the agent couldn't start, and why.
 func (t Texts) StartFailed(err error) string { return fmt.Sprintf(t.startFailed, err) }
@@ -83,13 +97,23 @@ var texts = map[Lang]Texts{
 			"No pide contraseña de administrador.\n\n¿Instalarlo en esta PC?",
 		AlreadyRunning: "El agente de impresión ya está funcionando en esta PC.",
 		Paired: "Listo: esta PC ya imprime los tickets de QuickTable.\n\n" +
-			"El agente queda funcionando en segundo plano y arranca solo con Windows.",
+			"El programa queda funcionando (lo ves junto al reloj de Windows) y arranca solo con la PC.",
+		NotConnected: "Esta PC no está conectada a ningún restaurante.\n\n" +
+			"Para conectarla, entrá al administrador de QuickTable > Impresión > Instalar programa de impresión, " +
+			"y abrí el archivo que se descarga.",
+		ExitPrompt:      "Si cerrás el programa, los pedidos dejan de imprimirse hasta que lo abras de nuevo o reinicies la PC.\n\n¿Cerrarlo?",
+		StatusConnected: "Conectado",
+		StatusOffline:   "Sin conexión a internet",
+		StatusUnpaired:  "Sin conectar a un restaurante",
+		MenuConnect:     "Conectar con un código",
+		MenuExit:        "Cerrar",
+		trayTitle:       "QuickTable Impresión %s",
 		UninstallPrompt: "¿Desinstalar el agente de impresión de QuickTable?\n\nEsta PC deja de imprimir los tickets.",
 		Uninstalled: "El agente de impresión se desinstaló.\n\n" +
 			"Recordá desvincular esta PC también desde el administrador de QuickTable (Impresión).",
 		pairingCode: "Código de vinculación:\n\n        %s\n\n" +
-			"En el administrador de QuickTable entrá a Impresión > Vincular PC e ingresá este código.\n\n" +
-			"El código vence en unos minutos. Al cerrar este aviso, si todavía hace falta, se muestra uno nuevo.",
+			"En el administrador de QuickTable entrá a Impresión > Tengo un código e ingresalo.\n\n" +
+			"El código vence en unos minutos.",
 		startFailed:    "El agente de impresión no pudo iniciar:\n\n%v",
 		replaceRunning: "El agente de impresión ya está instalado en esta PC.\n\n¿Reemplazarlo por esta versión (%s)?",
 	},
@@ -101,13 +125,23 @@ var texts = map[Lang]Texts{
 			"It doesn't ask for an administrator password.\n\nInstall it on this PC?",
 		AlreadyRunning: "The print agent is already running on this PC.",
 		Paired: "Done: this PC now prints QuickTable's tickets.\n\n" +
-			"The agent keeps running in the background and starts with Windows.",
+			"The program keeps running (you'll see it next to the Windows clock) and starts with the PC.",
+		NotConnected: "This PC isn't connected to any restaurant.\n\n" +
+			"To connect it, go to QuickTable's admin > Impresión > Instalar programa de impresión, " +
+			"and open the file it downloads.",
+		ExitPrompt:      "If you close the program, orders stop printing until you open it again or restart the PC.\n\nClose it?",
+		StatusConnected: "Connected",
+		StatusOffline:   "No internet connection",
+		StatusUnpaired:  "Not connected to a restaurant",
+		MenuConnect:     "Connect with a code",
+		MenuExit:        "Close",
+		trayTitle:       "QuickTable Printing %s",
 		UninstallPrompt: "Uninstall QuickTable's print agent?\n\nThis PC will stop printing tickets.",
 		Uninstalled: "The print agent was uninstalled.\n\n" +
 			"Remember to unpair this PC in QuickTable's admin too (Impresión).",
 		pairingCode: "Pairing code:\n\n        %s\n\n" +
-			"In QuickTable's admin, go to Impresión > Vincular PC and enter this code.\n\n" +
-			"The code expires in a few minutes. When you close this notice, a new one is shown if it's still needed.",
+			"In QuickTable's admin, go to Impresión > Tengo un código and enter it.\n\n" +
+			"The code expires in a few minutes.",
 		startFailed:    "The print agent couldn't start:\n\n%v",
 		replaceRunning: "The print agent is already installed on this PC.\n\nReplace it with this version (%s)?",
 	},
