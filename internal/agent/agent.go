@@ -19,7 +19,7 @@ import (
 type API interface {
 	ClaimInstall(ctx context.Context, code string) (token string, err error)
 	Heartbeat(ctx context.Context, printers []api.ReportedPrinter, failure *api.UpdateFailure) (api.HeartbeatResult, error)
-	Claim(ctx context.Context, wait time.Duration) ([]api.Job, error)
+	Claim(ctx context.Context, wait time.Duration) (jobs []api.Job, retryAfter time.Duration, err error)
 	Report(ctx context.Context, jobID string, printErr error) error
 }
 
@@ -248,7 +248,7 @@ func (a *Agent) work(ctx context.Context, client API) (*update.Release, error) {
 
 	backoff := minBackoff
 	for ctx.Err() == nil {
-		jobs, err := client.Claim(ctx, a.ClaimWait)
+		jobs, retryAfter, err := client.Claim(ctx, a.ClaimWait)
 		if errors.Is(err, api.ErrUnauthorized) {
 			return nil, err
 		}
@@ -277,6 +277,10 @@ func (a *Agent) work(ctx context.Context, client API) (*update.Release, error) {
 				return &release, nil
 			default:
 			}
+		}
+		// Nothing going on at the restaurant: the API said when to come back.
+		if retryAfter > 0 && !a.Sleep(ctx, retryAfter) {
+			break
 		}
 	}
 	return nil, ctx.Err()

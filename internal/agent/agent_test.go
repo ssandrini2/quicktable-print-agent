@@ -33,7 +33,8 @@ type fakeAPI struct {
 
 	heartbeat  api.HeartbeatResult // what every Heartbeat answers
 	failures   []*api.UpdateFailure
-	idleClaims int // empty claims answered (after the first heartbeat) before onIdle ends the run
+	retryAfter time.Duration // what an empty scripted claim says to wait
+	idleClaims int           // empty claims answered (after the first heartbeat) before onIdle ends the run
 	beat       sync.Once
 	beaten     chan struct{}
 }
@@ -62,13 +63,13 @@ func (f *fakeAPI) Heartbeat(_ context.Context, printers []api.ReportedPrinter, f
 	return f.heartbeat, nil
 }
 
-func (f *fakeAPI) Claim(ctx context.Context, _ time.Duration) ([]api.Job, error) {
+func (f *fakeAPI) Claim(ctx context.Context, _ time.Duration) ([]api.Job, time.Duration, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if len(f.claimErrs) > 0 {
 		err := f.claimErrs[0]
 		f.claimErrs = f.claimErrs[1:]
-		return nil, err
+		return nil, 0, err
 	}
 	if len(f.claims) == 0 {
 		if f.idleClaims > 0 {
@@ -78,16 +79,20 @@ func (f *fakeAPI) Claim(ctx context.Context, _ time.Duration) ([]api.Job, error)
 			time.Sleep(20 * time.Millisecond)
 			f.mu.Lock()
 			f.idleClaims--
-			return nil, nil
+			return nil, 0, nil
 		}
 		if f.onIdle != nil {
 			f.onIdle()
 		}
-		return nil, ctx.Err()
+		return nil, 0, ctx.Err()
 	}
 	jobs := f.claims[0]
 	f.claims = f.claims[1:]
-	return jobs, nil
+	// An empty answer may come with how long to stay away.
+	if len(jobs) == 0 {
+		return jobs, f.retryAfter, nil
+	}
+	return jobs, 0, nil
 }
 
 func (f *fakeAPI) Report(_ context.Context, jobID string, printErr error) error {
@@ -128,6 +133,7 @@ type harness struct {
 	states          []State
 	paired          int
 	tokens          []string // tokens the agent connected with
+	slept           []time.Duration
 	cancel          context.CancelFunc
 }
 
@@ -210,7 +216,12 @@ func newHarness(t *testing.T, token string) *harness {
 		},
 		Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		// No real waiting: a sleep only checks whether the run is over.
-		Sleep: func(ctx context.Context, _ time.Duration) bool { return ctx.Err() == nil },
+		Sleep: func(ctx context.Context, d time.Duration) bool {
+			h.mu.Lock()
+			h.slept = append(h.slept, d)
+			h.mu.Unlock()
+			return ctx.Err() == nil
+		},
 	}
 	return h
 }
@@ -491,5 +502,26 @@ func TestACodeInTheFileNameThatExpiredAsksForOne(t *testing.T) {
 	}
 	if h.asked != 1 || h.wrong != 0 {
 		t.Errorf("asked %d times, wrong-code notices %d", h.asked, h.wrong)
+	}
+}
+
+func TestStaysAwayWhenToldTheRestaurantIsIdle(t *testing.T) {
+	h := newHarness(t, "token")
+	h.api.retryAfter = 10 * time.Second
+	h.api.claims = [][]api.Job{{}, {job("a", "kitchen", "10.0.0.1:9100")}}
+
+	h.run()
+
+	waited := 0
+	for _, d := range h.slept {
+		if d == 10*time.Second {
+			waited++
+		}
+	}
+	if waited != 1 {
+		t.Fatalf("waited the 10 s it was told %d times (sleeps: %v)", waited, h.slept)
+	}
+	if len(h.sent) != 1 {
+		t.Errorf("sent %d tickets, want 1", len(h.sent))
 	}
 }

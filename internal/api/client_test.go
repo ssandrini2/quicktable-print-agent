@@ -81,9 +81,9 @@ func TestClaimDecodesJobs(t *testing.T) {
 	})
 	client := New(s.URL, "token", "1.0.0")
 
-	jobs, err := client.Claim(context.Background(), 25*time.Second)
-	if err != nil || len(jobs) != 1 {
-		t.Fatalf("got %+v, %v", jobs, err)
+	jobs, retryAfter, err := client.Claim(context.Background(), 25*time.Second)
+	if err != nil || len(jobs) != 1 || retryAfter != 0 {
+		t.Fatalf("got %+v, retry after %v, %v", jobs, retryAfter, err)
 	}
 	job := jobs[0]
 	if job.ID != "job-1" || !job.Reprint || job.Copies != 2 || job.Printer.PaperWidthMm != 58 {
@@ -95,8 +95,20 @@ func TestClaimDecodesJobs(t *testing.T) {
 	if line := job.Ticket.Lines[0]; line.MeatPoint != "MEDIUM" || line.ServingTime != "" || line.SubProducts[0].Name != "Cheese" {
 		t.Errorf("line: %+v", line)
 	}
-	if got := s.requests[0]; got.authorization != "Bearer token" || got.body["wait"] != float64(25) {
+	if got := s.requests[0]; got.authorization != "Bearer token" || got.body["wait"] != float64(25) || got.body["idleOk"] != true {
 		t.Errorf("request: %+v", got)
+	}
+}
+
+func TestClaimToldToStayAway(t *testing.T) {
+	s := newServer(t, map[string]func() (int, string){
+		"/print-agent/jobs/claim": func() (int, string) { return 200, `{"data":[],"meta":{"retryAfterSeconds":10}}` },
+	})
+
+	jobs, retryAfter, err := New(s.URL, "token", "1.0.0").Claim(context.Background(), 25*time.Second)
+
+	if err != nil || len(jobs) != 0 || retryAfter != 10*time.Second {
+		t.Fatalf("got %+v, retry after %v, %v", jobs, retryAfter, err)
 	}
 }
 
@@ -146,11 +158,11 @@ func TestErrors(t *testing.T) {
 	})
 	client := New(s.URL, "token", "1.0.0")
 
-	if _, err := client.Claim(context.Background(), 0); !errors.Is(err, ErrUnauthorized) {
+	if _, _, err := client.Claim(context.Background(), 0); !errors.Is(err, ErrUnauthorized) {
 		t.Errorf("401: got %v", err)
 	}
 	status = 502
-	if _, err := client.Claim(context.Background(), 0); err == nil || errors.Is(err, ErrUnauthorized) {
+	if _, _, err := client.Claim(context.Background(), 0); err == nil || errors.Is(err, ErrUnauthorized) {
 		t.Errorf("502: got %v", err)
 	}
 	if err := client.Report(context.Background(), "job-1", nil); !errors.Is(err, ErrNotHeld) {

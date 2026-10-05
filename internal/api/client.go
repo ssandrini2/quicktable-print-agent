@@ -121,12 +121,17 @@ func (c *Client) Heartbeat(ctx context.Context, printers []ReportedPrinter, fail
 }
 
 // Claim long-polls for jobs: it returns as soon as there are some, or empty
-// after about wait.
-func (c *Client) Claim(ctx context.Context, wait time.Duration) ([]Job, error) {
-	var jobs []Job
-	body := map[string]int{"wait": int(wait.Seconds())}
-	err := c.post(ctx, "/print-agent/jobs/claim", body, &jobs, wait+longPollSlack)
-	return jobs, err
+// after about wait. When the restaurant has nothing going on the API doesn't
+// hold the request: it answers at once with how long to stay away
+// (retryAfter, zero otherwise).
+func (c *Client) Claim(ctx context.Context, wait time.Duration) (jobs []Job, retryAfter time.Duration, err error) {
+	// idleOk: this agent honours retryAfter (one that didn't would ask again at once).
+	body := map[string]any{"wait": int(wait.Seconds()), "idleOk": true}
+	var meta struct {
+		RetryAfterSeconds float64 `json:"retryAfterSeconds"`
+	}
+	err = c.call(ctx, "/print-agent/jobs/claim", body, &jobs, &meta, wait+longPollSlack)
+	return jobs, time.Duration(meta.RetryAfterSeconds * float64(time.Second)), err
 }
 
 // Report settles a job: printed when printErr is nil, failed otherwise.
@@ -140,6 +145,11 @@ func (c *Client) Report(ctx context.Context, jobID string, printErr error) error
 
 // post sends body as JSON and decodes the response's "data" into out.
 func (c *Client) post(ctx context.Context, path string, body, out any, timeout time.Duration) error {
+	return c.call(ctx, path, body, out, nil, timeout)
+}
+
+// call is post that also decodes the response's "meta" into meta, when given.
+func (c *Client) call(ctx context.Context, path string, body, out, meta any, timeout time.Duration) error {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -189,6 +199,7 @@ func (c *Client) post(ctx context.Context, path string, body, out any, timeout t
 	}
 	envelope := struct {
 		Data any `json:"data"`
-	}{Data: out}
+		Meta any `json:"meta,omitempty"`
+	}{Data: out, Meta: meta}
 	return json.Unmarshal(raw, &envelope)
 }
