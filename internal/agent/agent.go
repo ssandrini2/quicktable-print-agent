@@ -17,8 +17,7 @@ import (
 
 // API is the part of the QuickTable API the agent uses (see api.Client).
 type API interface {
-	StartPairing(ctx context.Context) (api.Pairing, error)
-	PollPairing(ctx context.Context, deviceCode string) (api.PairingStatus, error)
+	ClaimInstall(ctx context.Context, code string) (token string, err error)
 	Heartbeat(ctx context.Context, printers []api.ReportedPrinter, failure *api.UpdateFailure) (api.HeartbeatResult, error)
 	Claim(ctx context.Context, wait time.Duration) ([]api.Job, error)
 	Report(ctx context.Context, jobID string, printErr error) error
@@ -36,20 +35,20 @@ type Agent struct {
 	Send func(ctx context.Context, connection, address string, data []byte) error
 	// InstalledPrinters lists the printers Windows has (see transport.InstalledPrinters).
 	InstalledPrinters func() ([]string, error)
-	// InstallCode is the code the downloaded program carried (an install
-	// approved in advance), "" when there is none; ClearInstallCode forgets it
-	// once it was used or turned out to be no good.
+	// InstallCode is the code the downloaded program carried in its file name
+	// (an install started in the admin), "" when there is none;
+	// ClearInstallCode forgets it once it was tried.
 	InstallCode      func() string
 	ClearInstallCode func() error
-	// Unpaired tells the person this PC isn't connected to a restaurant and
-	// how to connect it. CodeRequested then waits until they ask to connect
-	// with a code (false when ctx ended first), ShowCode shows them the code
-	// to enter in the admin, and Paired tells them it worked. Only
-	// CodeRequested may block.
-	Unpaired      func()
-	CodeRequested func(ctx context.Context) bool
-	ShowCode      func(userCode string)
-	Paired        func()
+	// AskCode asks the person to type the code the admin shows. It blocks
+	// until they answer; false means "not now". WrongCode tells them the code
+	// they typed isn't good, ConnectRequested waits until they ask to connect
+	// after a "not now" (false when ctx ended first), and Paired tells them
+	// it worked.
+	AskCode          func(ctx context.Context) (code string, ok bool)
+	WrongCode        func()
+	ConnectRequested func(ctx context.Context) bool
+	Paired           func()
 	// Status (optional) is told how the agent is doing, whenever it changes or not.
 	Status func(State)
 	Log    *slog.Logger
@@ -157,72 +156,63 @@ func (a *Agent) Run(ctx context.Context) error {
 	return ctx.Err()
 }
 
-// pair gets the agent its token, already saved. The normal way needs nobody:
-// the downloaded program carried an install code, approved in advance, and
-// it is traded for the token. Without one the agent waits, unpaired, until
-// the person asks to connect with a code — the fallback — and then shows one
-// and waits for a manager to approve it.
+// pair gets the agent its token, already saved, by trading an install's code
+// for it. The code normally came in the downloaded program's file name and
+// nobody sees it. Without one — the file lost its name, or this PC was
+// removed from the admin — the person is asked to type the one the admin
+// shows; if they'd rather not now, the agent waits until they ask to connect.
 func (a *Agent) pair(ctx context.Context) (string, error) {
 	client := a.Connect("")
 	if code := a.InstallCode(); code != "" {
-		token, err := a.claimInstall(ctx, client, code)
-		if err != nil || token != "" {
-			return token, err
+		token, err := a.claim(ctx, client, code)
+		if clearErr := a.ClearInstallCode(); clearErr != nil {
+			return "", fmt.Errorf("saving the pairing: %w", clearErr)
 		}
+		switch {
+		case err == nil:
+			return token, a.paired(token)
+		case ctx.Err() != nil:
+			return "", ctx.Err()
+		}
+		a.Log.Warn("the install code is no longer valid: asking for one")
 	}
 
 	a.setStatus(Unpaired)
-	a.Unpaired()
-	backoff := minBackoff
-	for {
-		if !a.CodeRequested(ctx) {
+	for ask := true; ; ask = false {
+		// Asked once on its own; after a "not now", when the person says so.
+		if !ask && !a.ConnectRequested(ctx) {
 			return "", ctx.Err()
 		}
-		pairing, err := client.StartPairing(ctx)
-		if err != nil {
-			a.Log.Warn("could not start pairing", "err", err)
-			if !a.Sleep(ctx, backoff) {
+		for {
+			code, ok := a.AskCode(ctx)
+			if !ok {
+				break
+			}
+			token, err := a.claim(ctx, client, code)
+			if err == nil {
+				return token, a.paired(token)
+			}
+			if ctx.Err() != nil {
 				return "", ctx.Err()
 			}
-			backoff = min(backoff*2, maxBackoff)
-			continue
+			a.WrongCode()
 		}
-		backoff = minBackoff
-		a.Log.Info("pairing started: waiting for the code to be approved in the admin")
-		a.ShowCode(pairing.UserCode)
-
-		token, err := a.awaitApproval(ctx, client, pairing)
-		if err != nil {
-			return "", err
+		if ctx.Err() != nil {
+			return "", ctx.Err()
 		}
-		if token == "" {
-			// No new code on its own: nobody may be there to read it.
-			a.Log.Info("the pairing code expired")
-			continue
-		}
-		return token, a.paired(token)
 	}
 }
 
-// claimInstall trades the install code for the token. It returns "" when the
-// code is no good (expired, or its install was replaced by a newer one): the
-// code is then forgotten.
-func (a *Agent) claimInstall(ctx context.Context, client API, code string) (string, error) {
+// claim trades a code for the token, waiting out a connection that is down.
+// Its error is api.ErrNotFound for a code that isn't good (anymore), or ctx's.
+func (a *Agent) claim(ctx context.Context, client API, code string) (string, error) {
 	backoff := minBackoff
 	for {
-		status, err := client.PollPairing(ctx, code)
-		switch {
-		case err == nil && status.Status == "approved" && status.Token != "":
-			if err := a.ClearInstallCode(); err != nil {
-				return "", fmt.Errorf("saving the pairing: %w", err)
-			}
-			return status.Token, a.paired(status.Token)
-		case err == nil || errors.Is(err, api.ErrNotFound):
-			a.Log.Warn("the install code is no longer valid: waiting to be connected")
-			return "", a.ClearInstallCode()
+		token, err := client.ClaimInstall(ctx, code)
+		if err == nil || errors.Is(err, api.ErrNotFound) {
+			return token, err
 		}
-		// Offline for now: the code is good for a while.
-		a.Log.Warn("could not connect with the install code", "err", err)
+		a.Log.Warn("could not reach the API to connect", "err", err)
 		a.setStatus(Offline)
 		if !a.Sleep(ctx, backoff) {
 			return "", ctx.Err()
@@ -244,34 +234,6 @@ func (a *Agent) paired(token string) error {
 func (a *Agent) setStatus(state State) {
 	if a.Status != nil {
 		a.Status(state)
-	}
-}
-
-// awaitApproval polls until the code is approved (the token) or stops being
-// usable ("").
-func (a *Agent) awaitApproval(ctx context.Context, client API, pairing api.Pairing) (string, error) {
-	interval := time.Duration(pairing.PollIntervalSeconds) * time.Second
-	if interval <= 0 {
-		interval = 3 * time.Second
-	}
-	deadline := time.Now().Add(time.Duration(pairing.ExpiresInSeconds) * time.Second)
-	for {
-		if !a.Sleep(ctx, interval) {
-			return "", ctx.Err()
-		}
-		status, err := client.PollPairing(ctx, pairing.DeviceCode)
-		switch {
-		case err != nil:
-			// Offline for a moment: the code is still good until it expires.
-			a.Log.Warn("could not check the pairing", "err", err)
-			if pairing.ExpiresInSeconds > 0 && time.Now().After(deadline) {
-				return "", nil
-			}
-		case status.Status == "approved" && status.Token != "":
-			return status.Token, nil
-		case status.Status != "pending":
-			return "", nil
-		}
 	}
 }
 

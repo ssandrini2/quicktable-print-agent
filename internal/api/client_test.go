@@ -43,25 +43,29 @@ func newServer(t *testing.T, answers map[string]func() (int, string)) *server {
 	return s
 }
 
-func TestPairing(t *testing.T) {
+func TestClaimInstall(t *testing.T) {
+	status := 200
 	s := newServer(t, map[string]func() (int, string){
-		"/print-agent/pair/start": func() (int, string) {
-			return 200, `{"data":{"deviceCode":"dc","userCode":"K7MPQ2XD","expiresInSeconds":600,"pollIntervalSeconds":3}}`
+		"/print-agent/claim": func() (int, string) {
+			if status != 200 {
+				return status, `{"error":"Invalid or expired code"}`
+			}
+			return 200, `{"data":{"token":"jwt"}}`
 		},
-		"/print-agent/pair/poll": func() (int, string) { return 200, `{"data":{"status":"approved","token":"jwt"}}` },
 	})
 	client := New(s.URL+"/", "", "1.0.0")
 
-	pairing, err := client.StartPairing(context.Background())
-	if err != nil || pairing.UserCode != "K7MPQ2XD" || pairing.PollIntervalSeconds != 3 {
-		t.Fatalf("got %+v, %v", pairing, err)
+	token, err := client.ClaimInstall(context.Background(), "K7MPQ2XD")
+	if err != nil || token != "jwt" {
+		t.Fatalf("got %q, %v", token, err)
 	}
-	status, err := client.PollPairing(context.Background(), pairing.DeviceCode)
-	if err != nil || status.Status != "approved" || status.Token != "jwt" {
-		t.Fatalf("got %+v, %v", status, err)
+	if s.requests[0].authorization != "" || s.requests[0].body["code"] != "K7MPQ2XD" {
+		t.Fatalf("request: %+v", s.requests[0])
 	}
-	if s.requests[0].authorization != "" || s.requests[1].body["deviceCode"] != "dc" {
-		t.Fatalf("requests: %+v", s.requests)
+
+	status = 404
+	if _, err := client.ClaimInstall(context.Background(), "WRONG"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("a code that isn't good: got %v", err)
 	}
 }
 

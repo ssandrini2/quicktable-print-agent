@@ -17,7 +17,7 @@ var icon []byte
 type Options struct {
 	// Title is the menu's first line: the program and its version.
 	Title string
-	// ConnectLabel and OnConnect: the entry to connect with a code, shown only while unpaired.
+	// ConnectLabel and OnConnect: the entry to connect the PC to a restaurant, shown only while unpaired.
 	ConnectLabel string
 	OnConnect    func()
 	// ExitLabel and OnExit: the entry to close the program (OnExit asks first).
@@ -72,7 +72,7 @@ func (t *Tray) SetStatus(text string) {
 	systray.SetTooltip(t.title + " - " + text)
 }
 
-// OfferConnect shows or hides the entry to connect with a code.
+// OfferConnect shows or hides the entry to connect the PC to a restaurant.
 func (t *Tray) OfferConnect(show bool) {
 	if show {
 		t.connect.Show()

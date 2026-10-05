@@ -20,16 +20,16 @@ import (
 type fakeAPI struct {
 	mu sync.Mutex
 
-	token        string
-	pairings     []api.Pairing       // StartPairing answers, in order
-	polls        []api.PairingStatus // PollPairing answers, in order
-	claims       [][]api.Job         // Claim answers, in order; then onIdle
-	onIdle       func()              // called once the scripted claims ran out
-	claimErrs    []error             // returned (one per call) before the claims
-	reportErrs   map[string][]error  // per job: errors before a report is accepted
-	reports      map[string][]error  // per job: the print errors reported
-	heartbeats   [][]api.ReportedPrinter
-	startedPairs int
+	token       string
+	goodCodes   map[string]string  // code → the token it is traded for
+	claimed     []string           // every code the agent tried
+	connectErrs []error            // returned (one per call) before a code is looked at
+	claims      [][]api.Job        // Claim answers, in order; then onIdle
+	onIdle      func()             // called once the scripted claims ran out
+	claimErrs   []error            // returned (one per call) before the claims
+	reportErrs  map[string][]error // per job: errors before a report is accepted
+	reports     map[string][]error // per job: the print errors reported
+	heartbeats  [][]api.ReportedPrinter
 
 	heartbeat  api.HeartbeatResult // what every Heartbeat answers
 	failures   []*api.UpdateFailure
@@ -38,20 +38,19 @@ type fakeAPI struct {
 	beaten     chan struct{}
 }
 
-func (f *fakeAPI) StartPairing(context.Context) (api.Pairing, error) {
+func (f *fakeAPI) ClaimInstall(_ context.Context, code string) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	pairing := f.pairings[f.startedPairs]
-	f.startedPairs++
-	return pairing, nil
-}
-
-func (f *fakeAPI) PollPairing(context.Context, string) (api.PairingStatus, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	status := f.polls[0]
-	f.polls = f.polls[1:]
-	return status, nil
+	if len(f.connectErrs) > 0 {
+		err := f.connectErrs[0]
+		f.connectErrs = f.connectErrs[1:]
+		return "", err
+	}
+	f.claimed = append(f.claimed, code)
+	if token, ok := f.goodCodes[code]; ok {
+		return token, nil
+	}
+	return "", api.ErrNotFound
 }
 
 func (f *fakeAPI) Heartbeat(_ context.Context, printers []api.ReportedPrinter, failure *api.UpdateFailure) (api.HeartbeatResult, error) {
@@ -120,15 +119,16 @@ type harness struct {
 	token   string
 	sent    []sent
 	offline map[string]bool // printer addresses that fail
-	codes   []string
+	typed   []string        // what the person answers each time they are asked for the code; then "not now"
+	asked   int
+	wrong   int
 	// The code the downloaded program carried, and what became of the wait for someone to ask for one.
-	installCode string
-	nobodyAsks  bool
-	unpaired    int
-	states      []State
-	paired      int
-	tokens      []string // tokens the agent connected with
-	cancel      context.CancelFunc
+	installCode     string
+	connectRequests int // times the person asks to connect after a "not now"
+	states          []State
+	paired          int
+	tokens          []string // tokens the agent connected with
+	cancel          context.CancelFunc
 }
 
 func newHarness(t *testing.T, token string) *harness {
@@ -172,14 +172,28 @@ func newHarness(t *testing.T, token string) *harness {
 			h.installCode = ""
 			return nil
 		},
-		Unpaired: func() {
+		AskCode: func(context.Context) (string, bool) {
 			h.mu.Lock()
 			defer h.mu.Unlock()
-			h.unpaired++
+			h.asked++
+			if len(h.typed) == 0 {
+				return "", false
+			}
+			code := h.typed[0]
+			h.typed = h.typed[1:]
+			return code, true
 		},
-		// Someone asks for a code right away, unless the test says nobody does.
-		CodeRequested: func(ctx context.Context) bool {
-			if h.nobodyAsks {
+		WrongCode: func() {
+			h.mu.Lock()
+			defer h.mu.Unlock()
+			h.wrong++
+		},
+		ConnectRequested: func(ctx context.Context) bool {
+			h.mu.Lock()
+			asks := h.connectRequests > 0
+			h.connectRequests--
+			h.mu.Unlock()
+			if !asks {
 				<-ctx.Done()
 			}
 			return ctx.Err() == nil
@@ -188,11 +202,6 @@ func newHarness(t *testing.T, token string) *harness {
 			h.mu.Lock()
 			defer h.mu.Unlock()
 			h.states = append(h.states, state)
-		},
-		ShowCode: func(code string) {
-			h.mu.Lock()
-			defer h.mu.Unlock()
-			h.codes = append(h.codes, code)
 		},
 		Paired: func() {
 			h.mu.Lock()
@@ -252,8 +261,8 @@ func TestPrintsClaimedJobsAndReportsThem(t *testing.T) {
 	if len(h.api.heartbeats) == 0 || h.api.heartbeats[0][0].Name != "EPSON TM-T20" {
 		t.Errorf("heartbeats: %v", h.api.heartbeats)
 	}
-	if len(h.codes) != 0 {
-		t.Error("a paired agent must not show a pairing code")
+	if h.asked != 0 {
+		t.Error("a paired agent must not ask for a code")
 	}
 }
 
@@ -300,27 +309,19 @@ func TestKeepsGoingAfterRequestsFail(t *testing.T) {
 	}
 }
 
-func TestPairsFirstAndAsksForANewCodeWhenOneExpires(t *testing.T) {
+func TestAsksForTheCodeWhenItHasNone(t *testing.T) {
 	h := newHarness(t, "")
-	h.api.pairings = []api.Pairing{
-		{DeviceCode: "d1", UserCode: "AAAA2222", ExpiresInSeconds: 600, PollIntervalSeconds: 3},
-		{DeviceCode: "d2", UserCode: "BBBB3333", ExpiresInSeconds: 600, PollIntervalSeconds: 3},
-	}
-	h.api.polls = []api.PairingStatus{
-		{Status: "pending"},
-		{Status: "expired"},
-		{Status: "pending"},
-		{Status: "approved", Token: "fresh-token"},
-	}
+	h.api.goodCodes = map[string]string{"K7MPQ2XD": "fresh-token"}
+	h.typed = []string{"WRONG123", "K7MPQ2XD"}
 	h.api.claims = [][]api.Job{{job("a", "kitchen", "10.0.0.1:9100")}}
 
 	h.run()
 
-	if len(h.codes) != 2 || h.codes[0] != "AAAA2222" || h.codes[1] != "BBBB3333" {
-		t.Fatalf("codes shown: %v", h.codes)
-	}
 	if h.token != "fresh-token" || h.paired != 1 {
 		t.Fatalf("token %q, paired %d", h.token, h.paired)
+	}
+	if h.asked != 2 || h.wrong != 1 {
+		t.Errorf("asked %d times, told the code was wrong %d times", h.asked, h.wrong)
 	}
 	if last := h.tokens[len(h.tokens)-1]; last != "fresh-token" {
 		t.Errorf("the agent works with %q", last)
@@ -330,16 +331,42 @@ func TestPairsFirstAndAsksForANewCodeWhenOneExpires(t *testing.T) {
 	}
 }
 
-func TestPairsAgainWhenUnpairedFromTheAdmin(t *testing.T) {
+func TestANotNowWaitsUntilThePersonAsksToConnect(t *testing.T) {
+	h := newHarness(t, "")
+	h.api.goodCodes = map[string]string{"K7MPQ2XD": "fresh-token"}
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	_ = h.agent.Run(ctx)
+
+	// Asked once on its own, answered "not now": no more questions.
+	if h.asked != 1 || h.token != "" {
+		t.Fatalf("asked %d times, token %q", h.asked, h.token)
+	}
+	if len(h.states) == 0 || h.states[len(h.states)-1] != Unpaired {
+		t.Errorf("states %v", h.states)
+	}
+
+	// From the tray icon: asked again.
+	h.connectRequests = 1
+	h.typed = []string{"K7MPQ2XD"}
+	h.api.claims = [][]api.Job{{}}
+	h.run()
+	if h.token != "fresh-token" {
+		t.Fatalf("token %q", h.token)
+	}
+}
+
+func TestAsksForACodeWhenItsPCIsRemovedFromTheAdmin(t *testing.T) {
 	h := newHarness(t, "revoked-token")
 	h.api.claimErrs = []error{api.ErrUnauthorized}
-	h.api.pairings = []api.Pairing{{DeviceCode: "d1", UserCode: "AAAA2222", ExpiresInSeconds: 600, PollIntervalSeconds: 3}}
-	h.api.polls = []api.PairingStatus{{Status: "approved", Token: "fresh-token"}}
+	h.api.goodCodes = map[string]string{"K7MPQ2XD": "fresh-token"}
+	h.typed = []string{"K7MPQ2XD"}
 
 	h.run()
 
-	if h.token != "fresh-token" || len(h.codes) != 1 {
-		t.Fatalf("token %q, codes %v", h.token, h.codes)
+	if h.token != "fresh-token" || h.asked != 1 {
+		t.Fatalf("token %q, asked %d times", h.token, h.asked)
 	}
 }
 
@@ -430,10 +457,12 @@ func TestReportsAFailedUpdateAndDoesNotRetryIt(t *testing.T) {
 	}
 }
 
-func TestInstallCodePairsWithoutShowingACode(t *testing.T) {
+func TestTheCodeInTheFileNameConnectsWithoutAsking(t *testing.T) {
 	h := newHarness(t, "")
 	h.installCode = "the-code-in-the-file-name"
-	h.api.polls = []api.PairingStatus{{Status: "approved", Token: "fresh-token"}}
+	h.api.goodCodes = map[string]string{"the-code-in-the-file-name": "fresh-token"}
+	// No connection at first: it keeps trying, the code is still good.
+	h.api.connectErrs = []error{errors.New("no network")}
 	h.api.claims = [][]api.Job{{job("a", "kitchen", "10.0.0.1:9100")}}
 
 	h.run()
@@ -441,19 +470,17 @@ func TestInstallCodePairsWithoutShowingACode(t *testing.T) {
 	if h.token != "fresh-token" || h.installCode != "" || h.paired != 1 {
 		t.Fatalf("token %q, install code %q, paired %d", h.token, h.installCode, h.paired)
 	}
-	if len(h.codes) != 0 || h.unpaired != 0 {
-		t.Errorf("nobody should be asked anything: codes %v, unpaired notices %d", h.codes, h.unpaired)
+	if h.asked != 0 {
+		t.Errorf("nobody should be asked anything, asked %d times", h.asked)
 	}
 	if len(h.sent) != 1 || h.states[len(h.states)-1] != Connected {
 		t.Errorf("sent %d tickets, states %v", len(h.sent), h.states)
 	}
 }
 
-func TestAnInstallCodeThatExpiredLeavesTheAgentWaiting(t *testing.T) {
+func TestACodeInTheFileNameThatExpiredAsksForOne(t *testing.T) {
 	h := newHarness(t, "")
 	h.installCode = "stale"
-	h.nobodyAsks = true
-	h.api.polls = []api.PairingStatus{{Status: "expired"}}
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 
@@ -462,11 +489,7 @@ func TestAnInstallCodeThatExpiredLeavesTheAgentWaiting(t *testing.T) {
 	if h.installCode != "" || h.token != "" {
 		t.Fatalf("install code %q, token %q", h.installCode, h.token)
 	}
-	// It says so once and shows no code until someone asks for one.
-	if h.unpaired != 1 || len(h.codes) != 0 || h.api.startedPairs != 0 {
-		t.Errorf("unpaired notices %d, codes %v, pairings started %d", h.unpaired, h.codes, h.api.startedPairs)
-	}
-	if len(h.states) == 0 || h.states[len(h.states)-1] != Unpaired {
-		t.Errorf("states %v", h.states)
+	if h.asked != 1 || h.wrong != 0 {
+		t.Errorf("asked %d times, wrong-code notices %d", h.asked, h.wrong)
 	}
 }

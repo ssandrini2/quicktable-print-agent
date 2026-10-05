@@ -35,24 +35,29 @@ sequenceDiagram
   M->>F: open it → "Install on this PC?" → yes
   F->>F: copy to %LOCALAPPDATA% · start with Windows · list in Installed apps
   F->>AG: write the code to config.json · start the installed copy
-  AG->>API: POST /print-agent/pair/poll (the code)
+  AG->>API: POST /print-agent/claim (the code)
   API-->>AG: token
   AG->>API: heartbeat → "Conectada" in the admin
 ```
 
-**How it knows its restaurant.** The program is one generic file. The admin starts an install — a
-pairing the API approves in advance — and saves the download as `QuickTable-Impresion-<64 hex>.exe`.
+**How it knows its restaurant.** The program is one generic file. The admin starts an install — an
+agent the API ties to that restaurant — and saves the download as `QuickTable-Impresion-<64 hex>.exe`.
 The program looks for that code in its own file name (`installCodeInName` in `cmd/agent/install.go`),
-keeps it in `config.json`, and its first run trades it for its token. The code is good for one hour
-and for one install; a browser adding ` (1)` to the name doesn't matter.
+keeps it in `config.json`, and its first run trades it for its token (`POST /print-agent/claim`). A
+browser adding ` (1)` to the name doesn't matter.
 
-**When that doesn't work** — the file was renamed, or an hour passed — the program installs but
-isn't connected: it says so once, and its tray icon shows "Sin conectar". Two ways out: download it
-again from the admin (it replaces the installed one), or the fallback: icon → **Conectar con un
-código**, and in the admin **Impresión → Tengo un código**.
+**When the file lost its name** — renamed, sent over a chat — the program can't know its restaurant,
+so it **asks for a code**: the short one the admin shows next to the install while it waits ("Si te
+pide un código: K7MP Q2XD"). Typing it does the same as the file name would have.
 
-**Removing the PC from the admin** leaves the program installed and unconnected, in that same state.
-Installing again from the admin reconnects it.
+Both codes are good for one hour and for one install. Past that, start the install again in the admin.
+
+**"Ahora no"** on that question leaves the program installed and unconnected; its tray icon says so
+and has **Conectar a un restaurante**, which asks again.
+
+**Removing the PC from the admin** leaves the program in that same state, asking for a code. Starting
+an install again in the admin gives one — or just open the new download, which replaces the program
+already there and connects on its own.
 
 Everything is per user (`HKCU`), which is why no administrator rights are needed:
 
@@ -64,7 +69,8 @@ Everything is per user (`HKCU`), which is why no administrator rights are needed
 
 **The tray icon.** While it runs, the program sits in the Windows notification area (next to the
 clock; Windows may tuck it behind the `^` arrow). Its menu shows the version and the state —
-connected, no internet, or not connected to a restaurant — and **Cerrar**, which first warns that
+connected, no internet, or not connected to a restaurant (then with **Conectar a un restaurante**)
+— and **Cerrar**, which first warns that
 orders stop printing until it is opened again or the PC restarts. The icon is
 `internal/tray/icon.ico`, drawn by `scripts/make-icon.py`.
 

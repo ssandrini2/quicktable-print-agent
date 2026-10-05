@@ -166,8 +166,8 @@ func (a *app) run(loadErr error) error {
 		}()
 	}
 
-	// The person asking, from the icon's menu, to connect with a code.
-	codeRequests := make(chan struct{}, 1)
+	// The person asking, from the icon's menu, to connect this PC.
+	connectRequests := make(chan struct{}, 1)
 	var shown atomic.Int32
 	shown.Store(-1)
 	var workErr error
@@ -176,7 +176,7 @@ func (a *app) run(loadErr error) error {
 		ConnectLabel: a.texts.MenuConnect,
 		OnConnect: func() {
 			select {
-			case codeRequests <- struct{}{}:
+			case connectRequests <- struct{}{}:
 			default:
 			}
 		},
@@ -200,17 +200,19 @@ func (a *app) run(loadErr error) error {
 			},
 			Send:              transport.Send,
 			InstalledPrinters: transport.InstalledPrinters,
-			Unpaired:          func() { go platform.Notify(a.texts.Title, a.texts.NotConnected) },
-			CodeRequested: func(ctx context.Context) bool {
+			AskCode: func(context.Context) (string, bool) {
+				return platform.AskText(a.texts.Title, a.texts.CodePrompt, a.texts.OK, a.texts.NotNow)
+			},
+			WrongCode: func() { platform.Notify(a.texts.Title, a.texts.WrongCode) },
+			ConnectRequested: func(ctx context.Context) bool {
 				select {
-				case <-codeRequests:
+				case <-connectRequests:
 					return true
 				case <-ctx.Done():
 					return false
 				}
 			},
-			ShowCode: func(userCode string) { go platform.Notify(a.texts.Title, a.texts.PairingCode(userCode)) },
-			Paired:   func() { go platform.Notify(a.texts.Title, a.texts.Paired) },
+			Paired: func() { go platform.Notify(a.texts.Title, a.texts.Paired) },
 			Status: func(state agent.State) {
 				// Told on every request that works: only a change touches the icon.
 				if shown.Swap(int32(state)) == int32(state) {

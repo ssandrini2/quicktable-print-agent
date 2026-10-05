@@ -41,9 +41,6 @@ func TestEveryTextExistsInBothLanguages(t *testing.T) {
 
 func TestMessagesWithValues(t *testing.T) {
 	spanish := For(Spanish)
-	if got := spanish.PairingCode("K7MPQ2XD"); !strings.Contains(got, "K7MP Q2XD") {
-		t.Errorf("the code should read in two groups: %q", got)
-	}
 	if got := spanish.StartFailed(errors.New("disk full")); !strings.Contains(got, "disk full") {
 		t.Errorf("got %q", got)
 	}
