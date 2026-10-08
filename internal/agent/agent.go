@@ -21,6 +21,7 @@ type API interface {
 	Heartbeat(ctx context.Context, printers []api.ReportedPrinter, failure *api.UpdateFailure) (api.HeartbeatResult, error)
 	Claim(ctx context.Context, wait time.Duration) (jobs []api.Job, retryAfter time.Duration, err error)
 	Report(ctx context.Context, jobID string, printErr error) error
+	SendDiagnostics(ctx context.Context, log string) error
 }
 
 // Agent wires the API to the PC's printers. Every field is required unless
@@ -60,6 +61,9 @@ type Agent struct {
 	// FailedUpdate (optional) is the update that was tried and undone, if
 	// any: it is reported to the API and not tried again.
 	FailedUpdate func() *api.UpdateFailure
+	// Diagnostics (optional) is the end of the agent's own log: sent to the
+	// API when QuickTable asks for it in a heartbeat's answer.
+	Diagnostics func() (string, error)
 	// Now is the PC's clock (time.Now by default).
 	Now func() time.Time
 
@@ -307,6 +311,9 @@ func (a *Agent) heartbeats(ctx context.Context, client API, updates chan<- updat
 				failure = a.FailedUpdate()
 			}
 			result, err := client.Heartbeat(ctx, printers, failure)
+			if err == nil && result.DiagnosticsRequested {
+				a.sendDiagnostics(ctx, client)
+			}
 			switch {
 			case err != nil && ctx.Err() == nil:
 				a.Log.Warn("heartbeat failed", "err", err)
@@ -322,6 +329,23 @@ func (a *Agent) heartbeats(ctx context.Context, client API, updates chan<- updat
 			return
 		}
 	}
+}
+
+// sendDiagnostics uploads the log QuickTable asked for. A failure is only
+// logged: the API keeps asking until it gets it.
+func (a *Agent) sendDiagnostics(ctx context.Context, client API) {
+	if a.Diagnostics == nil {
+		return
+	}
+	text, err := a.Diagnostics()
+	if err == nil {
+		err = client.SendDiagnostics(ctx, text)
+	}
+	if err != nil {
+		a.Log.Warn("could not send the diagnostics", "err", err)
+		return
+	}
+	a.Log.Info("diagnostics sent", "asked", "quicktable")
 }
 
 // printAll prints the claimed jobs: printers work side by side, each one's

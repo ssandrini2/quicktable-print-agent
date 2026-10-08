@@ -102,6 +102,8 @@ type HeartbeatResult struct {
 	// Update is the release the agent should move to; nil when it runs what it should.
 	Update       *update.Release `json:"update"`
 	UpdateWindow UpdateWindow    `json:"updateWindow"`
+	// DiagnosticsRequested: QuickTable asked for this agent's log (see SendDiagnostics).
+	DiagnosticsRequested bool `json:"diagnosticsRequested"`
 }
 
 // Heartbeat tells the API the agent is alive, which printers its PC has and
@@ -118,6 +120,13 @@ func (c *Client) Heartbeat(ctx context.Context, printers []ReportedPrinter, fail
 	var result HeartbeatResult
 	err := c.post(ctx, "/print-agent/heartbeat", body, &result, 30*time.Second)
 	return result, err
+}
+
+// SendDiagnostics uploads the end of the agent's log, for QuickTable to look
+// into a problem on this PC.
+func (c *Client) SendDiagnostics(ctx context.Context, log string) error {
+	body := map[string]string{"version": c.version, "log": log}
+	return c.post(ctx, "/print-agent/diagnostics", body, nil, 30*time.Second)
 }
 
 // Claim long-polls for jobs: it returns as soon as there are some, or empty
