@@ -1,7 +1,7 @@
 {
   "name": "quicktable-print-agent",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.3.0",
   "type": "module",
   "description": "Release tooling for the QuickTable print agent (the agent itself is Go — see README.md). \"version\" is the agent's version.",
   "scripts": {
