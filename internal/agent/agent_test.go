@@ -20,6 +20,8 @@ import (
 type fakeAPI struct {
 	mu sync.Mutex
 
+	diagnostics []string // every log the agent uploaded
+
 	token       string
 	goodCodes   map[string]string  // code → the token it is traded for
 	claimed     []string           // every code the agent tried
@@ -93,6 +95,13 @@ func (f *fakeAPI) Claim(ctx context.Context, _ time.Duration) ([]api.Job, time.D
 		return jobs, f.retryAfter, nil
 	}
 	return jobs, 0, nil
+}
+
+func (f *fakeAPI) SendDiagnostics(_ context.Context, log string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.diagnostics = append(f.diagnostics, log)
+	return nil
 }
 
 func (f *fakeAPI) Report(_ context.Context, jobID string, printErr error) error {
@@ -523,5 +532,20 @@ func TestStaysAwayWhenToldTheRestaurantIsIdle(t *testing.T) {
 	}
 	if len(h.sent) != 1 {
 		t.Errorf("sent %d tickets, want 1", len(h.sent))
+	}
+}
+
+func TestSendsItsLogWhenQuickTableAsksForIt(t *testing.T) {
+	h := newHarness(t, "token")
+	h.api.heartbeat = api.HeartbeatResult{DiagnosticsRequested: true}
+	h.api.idleClaims = 3
+	h.agent.Diagnostics = func() (string, error) { return "the last lines of the log", nil }
+
+	h.run()
+
+	h.api.mu.Lock()
+	defer h.api.mu.Unlock()
+	if len(h.api.diagnostics) == 0 || h.api.diagnostics[0] != "the last lines of the log" {
+		t.Fatalf("uploaded %v", h.api.diagnostics)
 	}
 }

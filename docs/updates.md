@@ -63,16 +63,30 @@ Everything is per user (`HKCU`), which is why no administrator rights are needed
 
 | What | Where |
 |---|---|
-| Program, `config.json`, `agent.log` | `%LOCALAPPDATA%\QuickTable\PrintAgent` |
+| Program, `config.json`, the logs (`agent-YYYY-MM-DD.log`) | `%LOCALAPPDATA%\QuickTable\PrintAgent` |
 | Start with Windows | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` → `QuickTablePrintAgent` |
 | Installed apps entry | `HKCU\…\Uninstall\QuickTablePrintAgent` (uninstall = the program's own `--uninstall`) |
 
 **The tray icon.** While it runs, the program sits in the Windows notification area (next to the
 clock; Windows may tuck it behind the `^` arrow). Its menu shows the version and the state —
 connected, no internet, or not connected to a restaurant (then with **Conectar a un restaurante**)
-— and **Cerrar**, which first warns that
-orders stop printing until it is opened again or the PC restarts. The icon is
-`internal/tray/icon.ico`, drawn by `scripts/make-icon.py`.
+— **Enviar diagnóstico a QuickTable** (below) and **Cerrar**, which first warns that
+orders stop printing until it is opened again or the PC restarts. The icon itself shows the state
+too: plain when connected, with a red dot when the API can't be reached, grey with an amber dot
+when the PC isn't connected to a restaurant. The icon is `internal/tray/icon.ico`, drawn by
+`scripts/make-icon.py`; its two variants are drawn from it by `scripts/status-icons.py`.
+
+**Nothing pops up when a request fails.** With no internet, or the API down, the agent keeps
+retrying on its own (every 1 to 30 seconds), the icon gets its red dot, and the tickets wait in the
+API's queue — up to 20 minutes each (`PRINT_JOB_MAX_AGE_MINUTES`), after which they show in the
+admin as not printed instead of coming out late.
+
+**Logs and diagnostics.** The agent logs to one file per day (`agent-YYYY-MM-DD.log`,
+`internal/logfile`) and keeps 14 days. To look into a PC from afar, the end of that log (about
+60 kB) is sent to the API: when someone at the restaurant picks **Enviar diagnóstico a QuickTable**
+in the tray menu, or when staff press **Pedir logs** in the staff console — the agent's next
+heartbeat (within a minute) is told and it uploads by itself. The staff console shows what arrived;
+the API keeps the last 5 per PC for 14 days.
 
 **Language.** Every message exists in Spanish and English (`internal/i18n`). Spanish is the default;
 an English Windows gets English; `--lang es|en` forces one, and an install run with `--lang`
@@ -218,7 +232,7 @@ With the API running locally (`RMS_DRIVER=mock`) and a staff account:
 3. In the admin, **Impresión → Instalar programa de impresión**, and open the download.
 4. In the staff console mark the PC as **Recibe pruebas**, then publish another beta the same way.
 5. Restart the agent (or wait for the window): within a minute it downloads, swaps and restarts.
-   `agent.log` in `%LOCALAPPDATA%\QuickTable\PrintAgent` shows each step; the staff console shows the
+   The day's log in `%LOCALAPPDATA%\QuickTable\PrintAgent` shows each step; the staff console shows the
    new version.
 6. **Retirar** that beta: the agent goes back to the previous one.
 

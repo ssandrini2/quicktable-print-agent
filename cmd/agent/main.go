@@ -11,7 +11,6 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -21,6 +20,7 @@ import (
 	"github.com/quicktable/print-agent/internal/api"
 	"github.com/quicktable/print-agent/internal/config"
 	"github.com/quicktable/print-agent/internal/i18n"
+	"github.com/quicktable/print-agent/internal/logfile"
 	"github.com/quicktable/print-agent/internal/platform"
 	"github.com/quicktable/print-agent/internal/transport"
 	"github.com/quicktable/print-agent/internal/tray"
@@ -34,10 +34,12 @@ var (
 )
 
 const (
-	exeName      = "quicktable-print-agent.exe"
-	logName      = "agent.log"
-	maxLogBytes  = 5 << 20
-	apiURLEnvVar = "QT_PRINT_AGENT_API_URL"
+	exeName = "quicktable-print-agent.exe"
+	// Days of log kept on the PC, and how much of its end is sent as diagnostics
+	// (the API keeps 60 000 characters and takes 100 kB per request).
+	logKeepDays        = 14
+	diagnosticsMaxSize = 60_000
+	apiURLEnvVar       = "QT_PRINT_AGENT_API_URL"
 	// How long the new version waits for the one it replaces to step aside.
 	handoverWait = 15 * time.Second
 	// What an update left behind is removed once the new version has run this long.
@@ -125,12 +127,18 @@ func (a *app) run(loadErr error) error {
 		return nil
 	}
 
-	log, closeLog, err := openLog(a.dir, a.opts.console)
+	logFile, err := logfile.Open(a.dir, logKeepDays)
 	if err != nil {
 		return err
 	}
-	defer closeLog()
+	defer logFile.Close()
+	var out io.Writer = logFile
+	if a.opts.console {
+		out = io.MultiWriter(logFile, os.Stderr)
+	}
+	log := slog.New(slog.NewTextHandler(out, nil))
 	a.log = log
+	diagnostics := func() (string, error) { return logFile.Tail(diagnosticsMaxSize) }
 	if loadErr != nil {
 		log.Warn("the saved configuration could not be read; starting unpaired", "err", loadErr)
 	}
@@ -180,6 +188,27 @@ func (a *app) run(loadErr error) error {
 			default:
 			}
 		},
+		DiagnosticsLabel: a.texts.MenuDiagnostics,
+		OnDiagnostics: func() {
+			a.mu.Lock()
+			token := a.saved.PairingToken()
+			a.mu.Unlock()
+			if token == "" {
+				platform.Notify(a.texts.Title, a.texts.DiagnosticsUnpaired)
+				return
+			}
+			log.Info("sending diagnostics", "asked", "tray")
+			text, err := diagnostics()
+			if err == nil {
+				err = api.New(apiURL, token, version).SendDiagnostics(ctx, text)
+			}
+			if err != nil {
+				log.Warn("could not send the diagnostics", "err", err)
+				platform.Notify(a.texts.Title, a.texts.DiagnosticsFailed)
+				return
+			}
+			platform.Notify(a.texts.Title, a.texts.DiagnosticsSent)
+		},
 		ExitLabel: a.texts.MenuExit,
 		OnExit: func() {
 			if platform.Confirm(a.texts.Title, a.texts.ExitPrompt) {
@@ -220,15 +249,16 @@ func (a *app) run(loadErr error) error {
 				}
 				switch state {
 				case agent.Connected:
-					icon.SetStatus(a.texts.StatusConnected)
+					icon.SetStatus(tray.OK, a.texts.StatusConnected)
 				case agent.Offline:
-					icon.SetStatus(a.texts.StatusOffline)
+					icon.SetStatus(tray.Offline, a.texts.StatusOffline)
 				default:
-					icon.SetStatus(a.texts.StatusUnpaired)
+					icon.SetStatus(tray.Unpaired, a.texts.StatusUnpaired)
 				}
 				icon.OfferConnect(state == agent.Unpaired)
 			},
 			FailedUpdate: a.failedUpdate,
+			Diagnostics:  diagnostics,
 			Log:          log,
 		}
 		if installs {
@@ -273,26 +303,6 @@ func (a *app) save(change func(*config.Config) error) error {
 		return err
 	}
 	return a.store.Save(a.saved)
-}
-
-// openLog logs to agent.log in dir, starting a new file once it gets big.
-func openLog(dir string, console bool) (*slog.Logger, func(), error) {
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return nil, nil, err
-	}
-	path := filepath.Join(dir, logName)
-	if info, err := os.Stat(path); err == nil && info.Size() > maxLogBytes {
-		_ = os.Rename(path, path+".1")
-	}
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
-	if err != nil {
-		return nil, nil, err
-	}
-	var out io.Writer = file
-	if console {
-		out = io.MultiWriter(file, os.Stderr)
-	}
-	return slog.New(slog.NewTextHandler(out, nil)), func() { _ = file.Close() }, nil
 }
 
 func firstNonEmpty(values ...string) string {

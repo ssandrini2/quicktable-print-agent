@@ -62,8 +62,10 @@ internal/update/      release signature check, download, swap, revert
 internal/i18n/        every message, in Spanish and English
 internal/config/      state file and token protection (DPAPI)
 internal/platform/    message boxes, the "type the code" window, autostart, installed-apps entry, single instance
-internal/tray/        the icon in the Windows notification area
-scripts/              release.mjs: build + publish a version · make-icon.py: the tray icon
+internal/tray/        the icon in the Windows notification area, and its looks per state
+internal/logfile/     the log on disk: a file per day, 14 days kept, its tail for diagnostics
+scripts/              release.mjs: build + publish a version · make-icon.py: the tray icon ·
+                      status-icons.py: its "offline" and "not connected" variants
 ```
 
 ## Develop
