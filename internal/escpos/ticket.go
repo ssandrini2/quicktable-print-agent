@@ -10,7 +10,7 @@ import (
 
 // Ticket is what the API freezes in a print job: data, not formatting.
 type Ticket struct {
-	Kind         string `json:"kind"` // "order" or "test"
+	Kind         string `json:"kind"` // "order", "test" or "bill"
 	Title        string `json:"title"`
 	TableNumber  *int   `json:"tableNumber"`
 	OrderNumber  *int   `json:"orderNumber"`
@@ -19,6 +19,28 @@ type Ticket struct {
 	Note         string `json:"note"`
 	Continuation bool   `json:"continuation"`
 	Lines        []Line `json:"lines"`
+	// Bill is set on a guest's bill (kind "bill"); its Lines stay empty.
+	Bill *Bill `json:"bill"`
+}
+
+// Bill is what the guests pay, line by line, as the tablet shows it.
+type Bill struct {
+	Lines     []BillLine     `json:"lines"`
+	Discounts []BillDiscount `json:"discounts"`
+	Total     float64        `json:"total"`
+}
+
+// BillLine is one product on the bill and what it costs in all.
+type BillLine struct {
+	Quantity int     `json:"quantity"`
+	Name     string  `json:"name"`
+	Amount   float64 `json:"amount"`
+}
+
+// BillDiscount is one discount off the bill.
+type BillDiscount struct {
+	Label  string  `json:"label"`
+	Amount float64 `json:"amount"`
 }
 
 // Line is one product of the order.
@@ -89,9 +111,12 @@ func Render(ticket Ticket, options Options) []byte {
 	p.bold(false)
 	p.align(left)
 
-	if ticket.Kind == "test" {
+	switch {
+	case ticket.Kind == "test":
 		renderTest(p, ticket, options)
-	} else {
+	case ticket.Kind == "bill" && ticket.Bill != nil:
+		renderBill(p, ticket, options)
+	default:
 		renderOrder(p, ticket, options)
 	}
 
@@ -154,6 +179,75 @@ func renderOrder(p *page, ticket Ticket, options Options) {
 		p.wrapped("NOTA: "+note, "")
 		p.bold(false)
 	}
+}
+
+func renderBill(p *page, ticket Ticket, options Options) {
+	p.rule()
+	if ticket.TableNumber != nil {
+		p.bold(true)
+		p.size(doubleWidth | doubleHeight)
+		p.text(fmt.Sprintf("Mesa %d", *ticket.TableNumber))
+		p.size(normal)
+		p.bold(false)
+	}
+	var details []string
+	if ticket.People != nil && *ticket.People > 0 {
+		details = append(details, fmt.Sprintf("%d pers.", *ticket.People))
+	}
+	p.columns(strings.Join(details, " - "), clock(ticket.PlacedAt, options.Location))
+	p.rule()
+
+	for _, line := range ticket.Bill.Lines {
+		amount := money(line.Amount)
+		// The name takes what the amount leaves; a long one goes on to the next lines.
+		names := wrapWidths(fmt.Sprintf("%d x %s", line.Quantity, line.Name), p.cols-utf8.RuneCountInString(amount)-1, p.cols-4)
+		p.columns(names[0], amount)
+		for _, rest := range names[1:] {
+			p.text("    " + rest)
+		}
+	}
+	if len(ticket.Bill.Discounts) > 0 {
+		p.feed(1)
+		for _, discount := range ticket.Bill.Discounts {
+			p.columns(discount.Label, "-"+money(discount.Amount))
+		}
+	}
+	p.rule()
+	p.bold(true)
+	p.size(doubleHeight)
+	p.columns("TOTAL", money(ticket.Bill.Total))
+	p.size(normal)
+	p.bold(false)
+	p.rule()
+	p.align(center)
+	p.text("Gracias por tu visita")
+	p.align(left)
+}
+
+// money is an amount the way it's written in Argentina: $ 12.500, $ 99,50.
+func money(amount float64) string {
+	cents := int64(amount*100 + 0.5)
+	if amount < 0 {
+		cents = int64(amount*100 - 0.5)
+	}
+	sign := ""
+	if cents < 0 {
+		sign = "-"
+		cents = -cents
+	}
+	whole := fmt.Sprintf("%d", cents/100)
+	var grouped strings.Builder
+	for i, digit := range whole {
+		if i > 0 && (len(whole)-i)%3 == 0 {
+			grouped.WriteByte('.')
+		}
+		grouped.WriteRune(digit)
+	}
+	text := sign + "$ " + grouped.String()
+	if rest := cents % 100; rest != 0 {
+		text += fmt.Sprintf(",%02d", rest)
+	}
+	return text
 }
 
 func renderTest(p *page, ticket Ticket, options Options) {
