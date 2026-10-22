@@ -53,11 +53,19 @@ func EnglishUI() bool {
 	return langID&0x3ff == langEnglish
 }
 
+// instance tells a development run apart from the installed agent (see
+// UseDevInstance): its own "only one running" and "stop" names.
+var instance = ""
+
+// UseDevInstance makes this a development run (--no-install): it runs
+// alongside an installed agent, and an uninstall or reinstall leaves it alone.
+func UseDevInstance() { instance = "Dev" }
+
 // SingleInstance claims being the only agent running in the user's session.
 // It reports false when another one already is. release gives the claim up
 // (it otherwise lasts as long as the process).
 func SingleInstance() (only bool, release func(), err error) {
-	name, err := windows.UTF16PtrFromString(mutexName)
+	name, err := windows.UTF16PtrFromString(mutexName + instance)
 	if err != nil {
 		return false, nil, err
 	}
@@ -75,7 +83,7 @@ func SingleInstance() (only bool, release func(), err error) {
 // StopRequested returns a channel closed when another process asks this
 // agent to stop (RequestStop): an uninstall, or a reinstall over it.
 func StopRequested() (<-chan struct{}, error) {
-	name, err := windows.UTF16PtrFromString(stopEvent)
+	name, err := windows.UTF16PtrFromString(stopEvent + instance)
 	if err != nil {
 		return nil, err
 	}
@@ -97,7 +105,7 @@ func StopRequested() (<-chan struct{}, error) {
 // RequestStop asks the running agent, if there is one, to stop. It reports
 // whether there was one to ask.
 func RequestStop() bool {
-	name, err := windows.UTF16PtrFromString(stopEvent)
+	name, err := windows.UTF16PtrFromString(stopEvent + instance)
 	if err != nil {
 		return false
 	}

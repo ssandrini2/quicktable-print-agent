@@ -236,7 +236,11 @@ With the API running locally (`RMS_DRIVER=mock`) and a staff account:
    new version.
 6. **Retirar** that beta: the agent goes back to the previous one.
 
-`go run ./cmd/agent --no-install` never installs or updates — that's for working on the agent itself.
+`go run ./cmd/agent --no-install` never installs or updates — that's for working on the agent itself. It keeps its own pairing
+and log (`%LOCALAPPDATA%\QuickTable\PrintAgent-dev`) and runs next to an installed agent without
+touching it — so a PC whose agent prints for a restaurant can also run one against a local API. A local
+database has no published agent version for the admin's install: the API's
+`scripts/pair-local-print-agent.ts` starts one and prints the code to connect with.
 
 ## Not built
 
