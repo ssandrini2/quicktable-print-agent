@@ -59,6 +59,22 @@
       "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
     },
     {
+      "label": "Local: agent + virtual printer",
+      "detail": "Runs the agent against http://localhost:3000 and the virtual printer, side by side — connect it with \"Agent: pairing code (local API)\"",
+      "dependsOn": ["Virtual printer", "Agent: run (local API)"],
+      "dependsOrder": "parallel",
+      "problemMatcher": []
+    },
+    {
+      "label": "Agent: pairing code (local API)",
+      "detail": "Starts an install on the local API (../quicktable-api) and prints the code to type in the agent's \"Conectar\"",
+      "type": "shell",
+      "command": "npx tsx scripts/pair-local-print-agent.ts ${input:localRestaurantId}",
+      "options": { "cwd": "${workspaceFolder}/../quicktable-api" },
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "dedicated", "clear": true, "focus": true }
+    },
+    {
       "label": "Publish agent",
       "detail": "Bumps the version, tests, builds and publishes the agent to the API (staff login; 2FA code only for a final version)",
       "type": "process",
@@ -69,6 +85,12 @@
     }
   ],
   "inputs": [
+    {
+      "id": "localRestaurantId",
+      "type": "promptString",
+      "description": "Local restaurant id (empty: QuickTable Demo)",
+      "default": ""
+    },
     {
       "id": "bump",
       "type": "pickString",
