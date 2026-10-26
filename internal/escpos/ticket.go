@@ -220,6 +220,9 @@ func renderBill(p *page, ticket Ticket, options Options) {
 	p.bold(false)
 	p.rule()
 	p.align(center)
+	// A bill before payment isn't the invoice (Fudo issues that): it has to say so.
+	p.text("Documento no válido como factura")
+	p.feed(1)
 	p.text("Gracias por tu visita")
 	p.align(left)
 }
