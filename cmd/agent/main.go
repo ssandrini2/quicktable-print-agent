@@ -76,6 +76,13 @@ func main() {
 		platform.Notify(i18n.For(i18n.Spanish).Title, i18n.For(i18n.Spanish).StartFailed(err))
 		os.Exit(1)
 	}
+	if opts.noInstall {
+		// A development run keeps its own pairing and log, and runs next to an
+		// installed agent (paired to another restaurant, or production) without
+		// touching it.
+		dir += "-dev"
+		platform.UseDevInstance()
+	}
 	store := config.Store{Dir: dir}
 	// A damaged file means starting over, unpaired.
 	saved, loadErr := store.Load()

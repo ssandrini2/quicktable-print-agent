@@ -94,7 +94,7 @@ QT_PRINT_AGENT_API_URL=http://localhost:3000 go run ./cmd/agent --no-install --c
 
 | Flag | |
 |---|---|
-| `--no-install` | run from where it is: no install, no autostart, no updates |
+| `--no-install` | run from where it is: no install, no autostart, no updates — with its own pairing and log (`%LOCALAPPDATA%\QuickTable\PrintAgent-dev`), next to an installed agent without touching it |
 | `--console` | also log to the console |
 | `--lang es\|en` | language of the messages |
 | `--uninstall` | remove the agent from this PC |

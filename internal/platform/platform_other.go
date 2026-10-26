@@ -20,6 +20,9 @@ func Confirm(title, text string) bool {
 // EnglishUI always reports false.
 func EnglishUI() bool { return false }
 
+// UseDevInstance does nothing.
+func UseDevInstance() {}
+
 // SingleInstance always reports true.
 func SingleInstance() (bool, func(), error) { return true, func() {}, nil }
 

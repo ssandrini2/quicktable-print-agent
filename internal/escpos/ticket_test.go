@@ -172,3 +172,53 @@ func TestPreviewReadsATicketBack(t *testing.T) {
 		}
 	}
 }
+
+func bill() Ticket {
+	return Ticket{
+		Kind:        "bill",
+		Title:       "Cuenta",
+		TableNumber: intPtr(5),
+		OrderNumber: intPtr(42),
+		People:      intPtr(3),
+		PlacedAt:    "2026-10-01T23:15:00.000Z",
+		Bill: &Bill{
+			Lines: []BillLine{
+				{Quantity: 2, Name: "Milanesa napolitana", Amount: 32000},
+				{Quantity: 1, Name: "Stella Artois tirada", Amount: 8000},
+			},
+			Discounts: []BillDiscount{{Label: "Happy hour", Amount: 4000}},
+			Total:     36000,
+		},
+	}
+}
+
+func TestRenderBill(t *testing.T) {
+	text := strings.Join(printed(Render(bill(), Options{PaperWidthMm: 80, Location: time.UTC})), "\n")
+	for _, want := range []string{"CUENTA", "Mesa 5", "3 pers.", "2 x Milanesa napolitana", "$ 32.000", "Happy hour", "-$ 4.000", "TOTAL", "$ 36.000"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("missing %q in:\n%s", want, text)
+		}
+	}
+}
+
+func TestRenderBillNeverExceedsThePaper(t *testing.T) {
+	ticket := bill()
+	ticket.Bill.Lines[0].Name = "Milanesa napolitana a caballo con guarnición de papas rústicas y ensalada mixta"
+	ticket.Bill.Lines[0].Amount = 1234567.5
+	for _, width := range []int{58, 80} {
+		for _, line := range printed(Render(ticket, Options{PaperWidthMm: width})) {
+			if len(line) > charsPerLine(width) {
+				t.Errorf("%d mm: line of %d characters: %q", width, len(line), line)
+			}
+		}
+	}
+}
+
+func TestMoney(t *testing.T) {
+	cases := map[float64]string{0: "$ 0", 500: "$ 500", 12500: "$ 12.500", 1234567.5: "$ 1.234.567,50", 99.99: "$ 99,99"}
+	for amount, want := range cases {
+		if got := money(amount); got != want {
+			t.Errorf("money(%v) = %q, want %q", amount, got, want)
+		}
+	}
+}
