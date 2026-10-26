@@ -194,7 +194,7 @@ func bill() Ticket {
 
 func TestRenderBill(t *testing.T) {
 	text := strings.Join(printed(Render(bill(), Options{PaperWidthMm: 80, Location: time.UTC})), "\n")
-	for _, want := range []string{"CUENTA", "Mesa 5", "3 pers.", "2 x Milanesa napolitana", "$ 32.000", "Happy hour", "-$ 4.000", "TOTAL", "$ 36.000"} {
+	for _, want := range []string{"CUENTA", "Mesa 5", "3 pers.", "2 x Milanesa napolitana", "$ 32.000", "Happy hour", "-$ 4.000", "TOTAL", "$ 36.000", string(encode("Documento no válido como factura"))} {
 		if !strings.Contains(text, want) {
 			t.Errorf("missing %q in:\n%s", want, text)
 		}
