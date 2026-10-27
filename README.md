@@ -79,6 +79,8 @@ Everything below is also a VS Code task (**Terminal → Run Task**):
 | Tests | `go test ./...` and the release script's tests |
 | Agent: run (local API) | the agent from source against `http://localhost:3000`, not installed, logging to the console |
 | Virtual printer | a fake network printer on `127.0.0.1:9100` |
+| Local: agent + virtual printer | both of the above, side by side |
+| Agent: pairing code (local API) | a code to connect that agent to a restaurant of the local API (`../quicktable-api`) |
 | Agent: build (local) | `dist/quicktable-print-agent.exe` as version `dev` |
 | Publish agent | bump the version, test, build and publish — see [docs/updates.md](docs/updates.md) |
 
